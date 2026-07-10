@@ -144,20 +144,23 @@ function sendYtDiscord(type, oldItem, newItem, changes) {
 
 /* ================= 1. KIỂM TRA VIDEO ================= */
 function checkYoutube() {
-  const playlistId = getUploadsPlaylistId();
-  const ids = getAllVideoIds(playlistId);
-  const current = getVideosData(ids);
-
   const props = PropertiesService.getScriptProperties();
   const isFirstRun = props.getProperty(YT_INIT_FLAG) !== "1";
+  const previous = loadChunked(YT_PROP_PREFIX);
+
+  const playlistId = getUploadsPlaylistId();
+  const listedIds = getAllVideoIds(playlistId);
+
+  // Gộp thêm ID đã biết từ trước, để không bỏ sót video vừa chuyển sang private
+  const combinedIds = Array.from(new Set([...listedIds, ...Object.keys(previous)]));
+
+  const current = getVideosData(combinedIds);
 
   if (isFirstRun) {
     saveChunked(YT_PROP_PREFIX, current);
     props.setProperty(YT_INIT_FLAG, "1");
     return;
   }
-
-  const previous = loadChunked(YT_PROP_PREFIX);
 
   for (const id in current) {
     const now = current[id];
