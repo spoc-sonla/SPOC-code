@@ -1,6 +1,6 @@
-const YT_WEBHOOK_URL = "https://discord.com/api/webhooks/1523138976968343643/fTxhNUSR94wzC3DkQ7Yhoc43ertCVtrtFy7_0gtjSzKit3KC3LPnFhes_PIRvEHfba7p";
-const YT_PROP_PREFIX = "YT_SNAP_";
-const YT_INIT_FLAG = "YT_SNAP_INITIALIZED";
+const YT_WEBHOOK_URL = "https://discord.com/api/webhooks/...";
+const YT_PROP_PREFIX = "YT_SNAP_DATA_";
+const YT_INIT_FLAG = "YT_SNAP_INIT_DONE";
 const YT_CHANNEL_KEY = "YT_CHANNEL_SNAPSHOT";
 
 const PRIVACY_LABEL = {
@@ -8,6 +8,16 @@ const PRIVACY_LABEL = {
   unlisted: "🔗 Không công khai (unlisted)",
   private: "🔒 Riêng tư"
 };
+
+function cleanupOldProps() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  for (const key in all) {
+    if (key.indexOf("YT_SNAP_") === 0 && key.indexOf("YT_SNAP_DATA_") !== 0) {
+      props.deleteProperty(key);
+    }
+  }
+}
 
 /* ================= HÀM DÙNG CHUNG ================= */
 function getUploadsPlaylistId() {
@@ -109,7 +119,6 @@ function sendYtDiscordRaw(payload) {
     }
 
     if (code === 429) {
-      // Thử đọc thời gian chờ Discord yêu cầu, mặc định backoff tăng dần
       let waitMs = 1500 * (attempt + 1);
       try {
         const body = JSON.parse(res.getContentText());
@@ -117,14 +126,12 @@ function sendYtDiscordRaw(payload) {
           waitMs = Math.ceil(body.retry_after * 1000) + 200;
         }
       } catch (e) {
-        // Cloudflare block (error code 1015) không trả JSON -> dùng backoff mặc định, tăng mạnh hơn
         waitMs = 3000 * (attempt + 1);
       }
       Utilities.sleep(waitMs);
       continue;
     }
 
-    // Lỗi khác (4xx/5xx không phải rate limit) -> log lại và dừng, không retry vô ích
     Logger.log("Discord webhook lỗi code " + code + ": " + res.getContentText());
     return false;
   }
@@ -181,7 +188,6 @@ function sendYtDiscord(type, oldItem, newItem, changes) {
 
   // Delay nhẹ giữa các lần gửi liên tiếp để tránh bị Cloudflare chặn khi có nhiều video thay đổi cùng lúc
   Utilities.sleep(800);
-
   return ok;
 }
 
