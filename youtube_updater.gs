@@ -1,4 +1,4 @@
-const YT_WEBHOOK_URL = "https://discord.com/api/webhooks/...";
+const YT_WEBHOOK_URL = "https://discord.com/api/webhooks/1523138976968343643/fTxhNUSR94wzC3DkQ7Yhoc43ertCVtrtFy7_0gtjSzKit3KC3LPnFhes_PIRvEHfba7p";
 const YT_PROP_PREFIX = "YT_SNAP_";
 const YT_INIT_FLAG = "YT_SNAP_INITIALIZED";
 const YT_CHANNEL_KEY = "YT_CHANNEL_SNAPSHOT";
@@ -91,6 +91,48 @@ function loadChunked(prefix) {
 }
 
 /* ================= GỬI DISCORD (VIDEO) ================= */
+function sendYtDiscordRaw(payload) {
+  const MAX_RETRY = 5;
+
+  for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+    const res = UrlFetchApp.fetch(YT_WEBHOOK_URL, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const code = res.getResponseCode();
+
+    if (code === 200 || code === 204) {
+      return true;
+    }
+
+    if (code === 429) {
+      // Thử đọc thời gian chờ Discord yêu cầu, mặc định backoff tăng dần
+      let waitMs = 1500 * (attempt + 1);
+      try {
+        const body = JSON.parse(res.getContentText());
+        if (body.retry_after) {
+          waitMs = Math.ceil(body.retry_after * 1000) + 200;
+        }
+      } catch (e) {
+        // Cloudflare block (error code 1015) không trả JSON -> dùng backoff mặc định, tăng mạnh hơn
+        waitMs = 3000 * (attempt + 1);
+      }
+      Utilities.sleep(waitMs);
+      continue;
+    }
+
+    // Lỗi khác (4xx/5xx không phải rate limit) -> log lại và dừng, không retry vô ích
+    Logger.log("Discord webhook lỗi code " + code + ": " + res.getContentText());
+    return false;
+  }
+
+  Logger.log("Discord webhook thất bại sau " + MAX_RETRY + " lần thử (rate limited).");
+  return false;
+}
+
 function sendYtDiscord(type, oldItem, newItem, changes) {
   const CONFIG = {
     new_video:     { title: "🎬 Video mới",         color: 3066993 },
@@ -135,11 +177,12 @@ function sendYtDiscord(type, oldItem, newItem, changes) {
     fields.push({ name: "Liên kết", value: newItem.url, inline: false });
   }
 
-  UrlFetchApp.fetch(YT_WEBHOOK_URL, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify({ embeds: [{ title: cfg.title, color: cfg.color, fields: fields }] })
-  });
+  const ok = sendYtDiscordRaw({ embeds: [{ title: cfg.title, color: cfg.color, fields: fields }] });
+
+  // Delay nhẹ giữa các lần gửi liên tiếp để tránh bị Cloudflare chặn khi có nhiều video thay đổi cùng lúc
+  Utilities.sleep(800);
+
+  return ok;
 }
 
 /* ================= 1. KIỂM TRA VIDEO ================= */
@@ -150,10 +193,7 @@ function checkYoutube() {
 
   const playlistId = getUploadsPlaylistId();
   const listedIds = getAllVideoIds(playlistId);
-
-  // Gộp thêm ID đã biết từ trước, để không bỏ sót video vừa chuyển sang private
   const combinedIds = Array.from(new Set([...listedIds, ...Object.keys(previous)]));
-
   const current = getVideosData(combinedIds);
 
   if (isFirstRun) {
