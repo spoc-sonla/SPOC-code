@@ -1,14 +1,21 @@
 const WEBHOOK_URL = "https://discord.com/api/webhooks/...";
-const FOLDER_ID = "...";
+const FOLDER_ID = "1A5gyIKW9YOeYq8F11Pil1OBt55Lq8N5c";
+const ROOT_ID = FOLDER_ID;
 const ROOT_NAME = "SPOC";
 const PROP_PREFIX = "SNAP_";
 const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
+
+function fixSnapshot() {
+  initDriveSnapshot();
+  const check = loadSnapshot();
+  Logger.log("Số item saeu khi rebuild: " + Object.keys(check).length);
+}
 
 /* ================= THU THẬP TOÀN BỘ CÂY THƯ MỤC (dùng khi khởi tạo) ================= */
 function collectAll(folder, path, parentId, map) {
   map[folder.getId()] = {
     name: folder.getName(),
-    path: path, // với folder: path = đường dẫn đầy đủ của CHÍNH nó
+    path: path,
     parentId: parentId,
     isFolder: true,
     lastUpdated: folder.getLastUpdated().getTime(),
@@ -39,6 +46,15 @@ function collectAll(folder, path, parentId, map) {
 /* ================= LƯU / ĐỌC SNAPSHOT (chia chunk vì mỗi property tối đa ~9KB) ================= */
 function saveSnapshot(map) {
   const props = PropertiesService.getScriptProperties();
+  const keys = Object.keys(map);
+
+  // Safeguard: không cho ghi snapshot rỗng nếu trước đó có dữ liệu, tránh mất toàn bộ cây theo dõi
+  if (keys.length === 0) {
+    const countStr = props.getProperty(PROP_PREFIX + "COUNT");
+    if (countStr && Number(countStr) > 0) {
+      throw new Error("saveSnapshot: từ chối ghi đè snapshot rỗng lên snapshot đang có dữ liệu");
+    }
+  }
 
   const all = props.getProperties();
   for (const key in all) {
@@ -90,7 +106,7 @@ function initDriveSnapshot() {
 /* ================= KIỂM TRA XEM 1 FILE/FOLDER CÓ NẰM TRONG CÂY ĐANG THEO DÕI KHÔNG =================
    Nếu có mà chưa từng thấy -> tự đăng ký (dùng khi phát hiện item MỚI) */
 function ensureInTree(fileId, snapshot, newlyAdded) {
-  if (fileId === FOLDER_ID) return snapshot[FOLDER_ID] || null;
+  if (fileId === ROOT_ID) return snapshot[ROOT_ID] || null;
   if (snapshot[fileId]) return snapshot[fileId];
 
   let meta;
@@ -123,7 +139,7 @@ function ensureInTree(fileId, snapshot, newlyAdded) {
 
 /* ================= LẤY "VỊ TRÍ" (full path) ỨNG VỚI 1 parentId ================= */
 function getParentEntry(snapshot, parentId) {
-  if (parentId === FOLDER_ID) return snapshot[FOLDER_ID] || null;
+  if (parentId === ROOT_ID) return snapshot[ROOT_ID] || null;
   if (snapshot[parentId] && snapshot[parentId].isFolder) return snapshot[parentId];
   return null;
 }
@@ -161,7 +177,7 @@ function checkDriveFast() {
 
     for (const change of (response.changes || [])) {
       const fileId = change.fileId;
-      if (fileId === FOLDER_ID) continue; // bỏ qua thư mục gốc
+      if (fileId === ROOT_ID) continue; // bỏ qua thư mục gốc
 
       const wasTracked = !!snapshot[fileId];
 
