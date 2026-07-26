@@ -339,9 +339,36 @@ function sendDiscord(type, oldItem, newItem, modifiedBy, fromPath, toPath) {
     }]
   };
 
-  UrlFetchApp.fetch(WEBHOOK_URL, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(data)
-  });
+  // Retry tối đa 3 lần nếu bị rate-limit
+  const maxRetries = 3;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = UrlFetchApp.fetch(WEBHOOK_URL, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify(data),
+      muteHttpExceptions: true
+    });
+
+    const code = res.getResponseCode();
+
+    if (code >= 200 && code < 300) {
+      break; // gửi thành công
+    }
+
+    if (code === 429 && attempt < maxRetries) {
+      let retryAfterMs = 1000 * (attempt + 1); // fallback mặc định: 1s, 2s, 3s
+      try {
+        const body = JSON.parse(res.getContentText());
+        if (body.retry_after) retryAfterMs = Math.ceil(body.retry_after * 1000) + 200;
+      } catch (e) {
+      }
+      Utilities.sleep(retryAfterMs);
+      continue;
+    }
+
+    Logger.log("sendDiscord thất bại (code " + code + "): " + res.getContentText().substring(0, 200));
+    break;
+  }
+
+  Utilities.sleep(350);
 }
