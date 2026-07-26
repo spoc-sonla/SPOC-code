@@ -154,7 +154,7 @@ function updateDescendantPaths(snapshot, oldFullPath, newFullPath) {
   }
 }
 
-/* ================= HÀM CHÍNH — gắn vào trigger ================= */
+/* ================= HÀM CHÍNH — gắn vào trigger, chạy mỗi 1–5 phút ================= */
 function checkDriveFast() {
   const lock = LockService.getScriptLock();
   const gotLock = lock.tryLock(10000);
@@ -181,6 +181,7 @@ function checkDriveFast_() {
 
   const snapshot = loadSnapshot();
   const newlyAdded = [];
+  const pendingNotifications = []; // <-- gom lại thay vì gửi ngay
   let response;
 
   do {
@@ -192,14 +193,14 @@ function checkDriveFast_() {
 
     for (const change of (response.changes || [])) {
       const fileId = change.fileId;
-      if (fileId === ROOT_ID) continue; // bỏ qua thư mục gốc
+      if (fileId === ROOT_ID) continue;
 
       const wasTracked = !!snapshot[fileId];
 
       if (change.removed || (change.file && change.file.trashed)) {
         if (wasTracked) {
           const old = snapshot[fileId];
-          sendDiscord(old.isFolder ? "deleted_folder" : "deleted_file", old, old);
+          pendingNotifications.push(buildNotification(old.isFolder ? "deleted_folder" : "deleted_file", old, old));
           delete snapshot[fileId];
         }
         continue;
@@ -211,7 +212,7 @@ function checkDriveFast_() {
       if (!wasTracked) {
         const entry = ensureInTree(fileId, snapshot, newlyAdded);
         if (entry) {
-          sendDiscord(entry.isFolder ? "new_folder" : "new_file", entry, entry);
+          pendingNotifications.push(buildNotification(entry.isFolder ? "new_folder" : "new_file", entry, entry));
         }
         continue;
       }
@@ -230,7 +231,7 @@ function checkDriveFast_() {
         const newParentEntry = getParentEntry(snapshot, newParentId);
 
         if (!newParentEntry) {
-          sendDiscord(old.isFolder ? "deleted_folder" : "deleted_file", old, old);
+          pendingNotifications.push(buildNotification(old.isFolder ? "deleted_folder" : "deleted_file", old, old));
           delete snapshot[fileId];
           continue;
         }
@@ -247,14 +248,14 @@ function checkDriveFast_() {
           newLocationPath = newParentEntry.path;
         }
 
-        sendDiscord(
+        pendingNotifications.push(buildNotification(
           "moved",
           old,
           { name: meta.name, path: newLocationPath, parentId: newParentId, isFolder: old.isFolder, lastUpdated: newModified, url: old.url },
           null,
           oldFullPath,
           newFullPath
-        );
+        ));
       }
 
       const finalEntry = {
@@ -267,11 +268,11 @@ function checkDriveFast_() {
       };
 
       if (renamed && updated) {
-        sendDiscord("renamed_and_updated", old, finalEntry);
+        pendingNotifications.push(buildNotification("renamed_and_updated", old, finalEntry));
       } else if (renamed) {
-        sendDiscord("renamed", old, finalEntry);
+        pendingNotifications.push(buildNotification("renamed", old, finalEntry));
       } else if (updated) {
-        sendDiscord("updated", old, finalEntry);
+        pendingNotifications.push(buildNotification("updated", old, finalEntry));
       }
 
       snapshot[fileId] = finalEntry;
@@ -282,93 +283,129 @@ function checkDriveFast_() {
 
   saveSnapshot(snapshot);
   props.setProperty(TOKEN_PROP, response.newStartPageToken);
+
+  Logger.log("Số thông báo cần gửi: " + pendingNotifications.length);
+  sendBatchedDiscord(pendingNotifications);
 }
 
-/* ================= FORMAT TÊN FILE (tránh Discord parse nhầm markdown _ * ~ `) ================= */
+/* ================= FORMAT TÊN FILE ================= */
 function formatFileName(text) {
   if (!text) return "(trống)";
   const safe = text.replace(/`/g, "'");
   return "`" + safe + "`";
 }
 
-/* ================= GỬI THÔNG BÁO DISCORD ================= */
-function sendDiscord(type, oldItem, newItem, modifiedBy, fromPath, toPath) {
+/* ================= XÂY DỰNG 1 "MỤC THÔNG BÁO" (chưa gửi, chỉ build data) ================= */
+function buildNotification(type, oldItem, newItem, modifiedBy, fromPath, toPath) {
   const CONFIG = {
-    new_file:            { title: "📄 File mới",             color: 3066993 },
-    new_folder:          { title: "📁 Thư mục mới",          color: 3066993 },
-    deleted_file:        { title: "🗑️ File bị xóa",          color: 15158332 },
-    deleted_folder:      { title: "🗑️ Thư mục bị xóa",       color: 15158332 },
-    renamed:             { title: "✏️ Đổi tên",              color: 15844367 },
-    updated:             { title: "🔄 Cập nhật nội dung",     color: 5793266 },
-    renamed_and_updated: { title: "✏️🔄 Đổi tên & cập nhật",  color: 15105570 },
-    moved:               { title: "📦 Đã di chuyển",          color: 3447003 }
+    new_file:            { emoji: "📄", label: "File mới",             color: 3066993 },
+    new_folder:          { emoji: "📁", label: "Thư mục mới",          color: 3066993 },
+    deleted_file:        { emoji: "🗑️", label: "File bị xóa",          color: 15158332 },
+    deleted_folder:      { emoji: "🗑️", label: "Thư mục bị xóa",       color: 15158332 },
+    renamed:             { emoji: "✏️", label: "Đổi tên",              color: 15844367 },
+    updated:             { emoji: "🔄", label: "Cập nhật nội dung",     color: 5793266 },
+    renamed_and_updated: { emoji: "✏️🔄", label: "Đổi tên & cập nhật",  color: 15105570 },
+    moved:               { emoji: "📦", label: "Đã di chuyển",          color: 3447003 }
   };
 
-  const cfg = CONFIG[type] || { title: "Thay đổi Drive", color: 5763719 };
-  const fields = [];
+  const cfg = CONFIG[type] || { emoji: "🔔", label: "Thay đổi", color: 5763719 };
 
+  let line;
   if (type === "renamed" || type === "renamed_and_updated") {
-    fields.push({ name: "Tên cũ", value: formatFileName(oldItem.name), inline: true });
-    fields.push({ name: "Tên mới", value: formatFileName(newItem.name), inline: true });
+    line = `${cfg.emoji} **${cfg.label}**\n`
+         + `Tên: ${formatFileName(oldItem.name)}\n`
+         + `**⟶** ${formatFileName(newItem.name)}\n`
+         + `📍 ${formatFileName(newItem.path)}`;
+  } else if (type === "moved") {
+    line = `${cfg.emoji} **${cfg.label}**\n`
+         + `Tên: ${formatFileName(newItem.name)}\n`
+         + `${formatFileName(fromPath)}\n`
+         + `**⟶→** ${formatFileName(toPath)}`;
   } else {
-    fields.push({ name: "Tên", value: formatFileName(newItem.name), inline: false });
+    line = `${cfg.emoji} **${cfg.label}**\n`
+         + `Tên: ${formatFileName(newItem.name)}\n`
+         + `📂 ${formatFileName(newItem.path)}`;
   }
 
-  if (type === "moved") {
-    fields.push({ name: "Từ thư mục", value: formatFileName(fromPath), inline: false });
-    fields.push({ name: "Đến thư mục", value: formatFileName(toPath), inline: false });
-  } else {
-    fields.push({ name: "Vị trí", value: formatFileName(newItem.path), inline: false });
+  if (type !== "deleted_file" && type !== "deleted_folder" && newItem.url) {
+    line += `\n🔗 [Mở](${newItem.url})`;
   }
 
-  if (modifiedBy) {
-    fields.push({ name: "Người sửa gần nhất", value: modifiedBy, inline: true });
+  return { type: type, color: cfg.color, text: line };
+}
+
+/* ================= GỬI GỘP NHIỀU THÔNG BÁO THÀNH ÍT EMBED / REQUEST NHẤT ================= */
+function sendBatchedDiscord(notifications) {
+  if (!notifications || notifications.length === 0) return;
+
+  const now = new Date().toLocaleString("vi-VN");
+  const MAX_DESC_LENGTH = 3800;
+  const MAX_EMBEDS_PER_MESSAGE = 10;
+
+  // Gộp các dòng lại, cắt thành nhiều embed nếu tổng ký tự vượt giới hạn
+  const embeds = [];
+  let currentLines = [];
+  let currentLength = 0;
+  let currentColor = notifications[0].color;
+
+  function flushEmbed() {
+    if (currentLines.length === 0) return;
+    embeds.push({
+      title: `🔔 Cập nhật Drive (${currentLines.length} thay đổi)`,
+      description: currentLines.join("\n\n"),
+      color: currentColor,
+      footer: { text: now }
+    });
+    currentLines = [];
+    currentLength = 0;
   }
 
-  fields.push({ name: "Thời gian", value: new Date().toLocaleString("vi-VN"), inline: true });
-
-  if (type !== "deleted_file" && type !== "deleted_folder") {
-    fields.push({ name: "Liên kết", value: newItem.url, inline: false });
+  for (const n of notifications) {
+    const addedLength = n.text.length + 2;
+    if (currentLength + addedLength > MAX_DESC_LENGTH) {
+      flushEmbed();
+    }
+    currentLines.push(n.text);
+    currentLength += addedLength;
   }
+  flushEmbed();
 
-  const data = {
-    embeds: [{
-      title: cfg.title,
-      color: cfg.color,
-      fields: fields
-    }]
-  };
+  // Gửi theo lô, mỗi request tối đa MAX_EMBEDS_PER_MESSAGE embed
+  for (let i = 0; i < embeds.length; i += MAX_EMBEDS_PER_MESSAGE) {
+    const chunk = embeds.slice(i, i + MAX_EMBEDS_PER_MESSAGE);
+    postToDiscordWithRetry({ embeds: chunk });
+  }
+}
 
-  // Retry tối đa 3 lần nếu bị rate-limit
+/* ================= GỬI 1 REQUEST TỚI DISCORD, TỰ RETRY NẾU BỊ RATE-LIMIT ================= */
+function postToDiscordWithRetry(payload) {
   const maxRetries = 3;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const res = UrlFetchApp.fetch(WEBHOOK_URL, {
       method: "post",
       contentType: "application/json",
-      payload: JSON.stringify(data),
+      payload: JSON.stringify(payload),
       muteHttpExceptions: true
     });
 
     const code = res.getResponseCode();
 
-    if (code >= 200 && code < 300) {
-      break; // gửi thành công
-    }
+    if (code >= 200 && code < 300) return;
 
     if (code === 429 && attempt < maxRetries) {
-      let retryAfterMs = 1000 * (attempt + 1); // fallback mặc định: 1s, 2s, 3s
+      let retryAfterMs = 1000 * (attempt + 1);
       try {
         const body = JSON.parse(res.getContentText());
         if (body.retry_after) retryAfterMs = Math.ceil(body.retry_after * 1000) + 200;
-      } catch (e) {
-      }
+      } catch (e) {}
       Utilities.sleep(retryAfterMs);
       continue;
     }
 
-    Logger.log("sendDiscord thất bại (code " + code + "): " + res.getContentText().substring(0, 200));
-    break;
+    Logger.log("postToDiscordWithRetry thất bại (code " + code + "): " + res.getContentText().substring(0, 300));
+    return;
   }
 
+  // Delay nhẹ giữa các request khi có nhiều lô
   Utilities.sleep(350);
 }
