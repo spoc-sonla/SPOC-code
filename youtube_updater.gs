@@ -2,6 +2,8 @@ const YT_WEBHOOK_URL = "https://discord.com/api/webhooks/...";
 const YT_PROP_PREFIX = "YT_SNAP_DATA_";
 const YT_INIT_FLAG = "YT_SNAP_INIT_DONE";
 const YT_CHANNEL_KEY = "YT_CHANNEL_SNAPSHOT";
+const PL_PROP_PREFIX = "PL_SNAP_DATA_";
+const PL_INIT_FLAG = "PL_SNAP_INIT_DONE";
 
 const PRIVACY_LABEL = {
   public: "🌐 Công khai",
