@@ -1,4 +1,4 @@
-const WEBHOOK_URL = "https://discord.com/api/webhooks/...";
+const WEBHOOK_URL = "https://discord.com/api/webhooks/1523123920461627424/0ui0TszC0eX9PqSFurwT0Yn1XzqjmxZp0TjUzTRFV1LNz3GAS2u7c54u_GXXG_rXM1pM";
 const FOLDER_ID = "1A5gyIKW9YOeYq8F11Pil1OBt55Lq8N5c";
 const ROOT_ID = FOLDER_ID;
 const ROOT_NAME = "SPOC";
@@ -25,13 +25,22 @@ function collectAll(folder, path, parentId, map) {
   const files = folder.getFiles();
   while (files.hasNext()) {
     const f = files.next();
+    let md5 = null;
+    let headRevisionId = null;
+    try {
+      const meta = Drive.Files.get(f.getId(), { fields: "md5Checksum,headRevisionId" });
+      md5 = meta.md5Checksum || null;
+      headRevisionId = meta.headRevisionId || null;
+    } catch (e) {}
     map[f.getId()] = {
       name: f.getName(),
       path: path,
       parentId: folder.getId(),
       isFolder: false,
       lastUpdated: f.getLastUpdated().getTime(),
-      url: f.getUrl()
+      url: f.getUrl(),
+      md5: md5,
+      headRevisionId: headRevisionId
     };
   }
 
@@ -111,7 +120,7 @@ function ensureInTree(fileId, snapshot, newlyAdded) {
 
   let meta;
   try {
-    meta = Drive.Files.get(fileId, { fields: "id,name,mimeType,modifiedTime,parents,trashed,webViewLink" });
+    meta = Drive.Files.get(fileId, { fields: "id,name,mimeType,modifiedTime,parents,trashed,webViewLink,md5Checksum,headRevisionId" });
   } catch (e) {
     return null;
   }
@@ -129,7 +138,9 @@ function ensureInTree(fileId, snapshot, newlyAdded) {
     parentId: meta.parents[0],
     isFolder: isFolder,
     lastUpdated: new Date(meta.modifiedTime).getTime(),
-    url: meta.webViewLink || ("https://drive.google.com/open?id=" + fileId)
+    url: meta.webViewLink || ("https://drive.google.com/open?id=" + fileId),
+    md5: meta.md5Checksum || null,
+    headRevisionId: meta.headRevisionId || null
   };
 
   snapshot[fileId] = entry;
@@ -181,12 +192,12 @@ function checkDriveFast_() {
 
   const snapshot = loadSnapshot();
   const newlyAdded = [];
-  const pendingNotifications = []; // <-- gom lại thay vì gửi ngay
+  const pendingNotifications = [];
   let response;
 
   do {
     response = Drive.Changes.list(pageToken, {
-      fields: "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,trashed,parents,webViewLink))",
+      fields: "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,trashed,parents,webViewLink,md5Checksum,headRevisionId))",
       pageSize: 100,
       includeRemoved: true
     });
@@ -222,7 +233,24 @@ function checkDriveFast_() {
       const newParentId = meta.parents ? meta.parents[0] : old.parentId;
 
       const renamed = old.name !== meta.name;
-      const updated = !old.isFolder && old.lastUpdated !== newModified;
+
+      const newMd5 = meta.md5Checksum || null;
+      const newHeadRevisionId = meta.headRevisionId || null;
+
+      let updated = false;
+      if (!old.isFolder) {
+        if (old.md5 != null && newMd5 != null) {
+          // File thường (pdf, ảnh, video, docx...): so sánh md5Checksum
+          updated = old.md5 !== newMd5;
+        } else if (old.headRevisionId != null && newHeadRevisionId != null) {
+          // Google-native file (Docs/Sheets/Slides...): so sánh headRevisionId
+          updated = old.headRevisionId !== newHeadRevisionId;
+        } else {
+          // Fallback hiếm gặp: không có cả 2 field, đành so sánh modifiedTime
+          updated = old.lastUpdated !== newModified;
+        }
+      }
+
       const moved = newParentId !== old.parentId;
 
       let newLocationPath = old.path;
@@ -264,7 +292,9 @@ function checkDriveFast_() {
         parentId: newParentId,
         isFolder: old.isFolder,
         lastUpdated: newModified,
-        url: old.url
+        url: old.url,
+        md5: newMd5,
+        headRevisionId: newHeadRevisionId
       };
 
       if (renamed && updated) {
@@ -315,16 +345,16 @@ function buildNotification(type, oldItem, newItem, modifiedBy, fromPath, toPath)
     line = `${cfg.emoji} **${cfg.label}**\n`
          + `Tên: ${formatFileName(oldItem.name)}\n`
          + `**⟶** ${formatFileName(newItem.name)}\n`
-         + `📍 ${formatFileName(newItem.path)}`;
+         + `🎯 ${formatFileName(newItem.path)}`;
   } else if (type === "moved") {
     line = `${cfg.emoji} **${cfg.label}**\n`
          + `Tên: ${formatFileName(newItem.name)}\n`
          + `${formatFileName(fromPath)}\n`
-         + `**⟶→** ${formatFileName(toPath)}`;
+         + `**⟶** ${formatFileName(toPath)}`;
   } else {
     line = `${cfg.emoji} **${cfg.label}**\n`
          + `Tên: ${formatFileName(newItem.name)}\n`
-         + `📂 ${formatFileName(newItem.path)}`;
+         + `🎯 ${formatFileName(newItem.path)}`;
   }
 
   if (type !== "deleted_file" && type !== "deleted_folder" && newItem.url) {
