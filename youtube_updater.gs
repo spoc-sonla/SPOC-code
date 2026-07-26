@@ -285,3 +285,156 @@ function checkYoutubeChannel() {
 
   props.setProperty(YT_CHANNEL_KEY, JSON.stringify(current));
 }
+
+/* ================= 3. KIỂM TRA PLAYLIST ================= */
+function getAllPlaylists() {
+  let playlists = [];
+  let pageToken;
+  do {
+    const res = YouTube.Playlists.list('snippet,contentDetails', {
+      mine: true, maxResults: 50, pageToken: pageToken
+    });
+    (res.items || []).forEach(p => {
+      playlists.push({
+        id: p.id,
+        title: p.snippet.title,
+        description: p.snippet.description || "",
+        itemCount: p.contentDetails.itemCount
+      });
+    });
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  return playlists;
+}
+
+function getPlaylistItemIds(playlistId) {
+  let ids = [];
+  let pageToken;
+  do {
+    const res = YouTube.PlaylistItems.list('contentDetails,snippet', {
+      playlistId: playlistId, maxResults: 50, pageToken: pageToken
+    });
+    (res.items || []).forEach(item => {
+      ids.push({
+        videoId: item.contentDetails.videoId,
+        title: item.snippet.title
+      });
+    });
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  return ids;
+}
+
+function sendPlaylistDiscord(embed) {
+  sendYtDiscordRaw({ embeds: [embed] });
+  Utilities.sleep(800);
+}
+
+function checkPlaylists() {
+  const props = PropertiesService.getScriptProperties();
+  const isFirstRun = props.getProperty(PL_INIT_FLAG) !== "1";
+  const previous = loadChunked(PL_PROP_PREFIX);
+
+  const currentPlaylists = getAllPlaylists();
+  const current = {};
+
+  currentPlaylists.forEach(pl => {
+    current[pl.id] = {
+      title: pl.title,
+      description: pl.description,
+      items: getPlaylistItemIds(pl.id)
+    };
+  });
+
+  if (isFirstRun) {
+    saveChunked(PL_PROP_PREFIX, current);
+    props.setProperty(PL_INIT_FLAG, "1");
+    return;
+  }
+
+  // Playlist mới hoặc bị xóa
+  for (const id in current) {
+    if (!previous[id]) {
+      sendPlaylistDiscord({
+        title: "📃 Danh sách phát mới",
+        color: 3066993,
+        fields: [
+          { name: "Tên", value: formatText(current[id].title), inline: false },
+          { name: "Thời gian", value: new Date().toLocaleString("vi-VN"), inline: true }
+        ]
+      });
+    }
+  }
+  for (const id in previous) {
+    if (!current[id]) {
+      sendPlaylistDiscord({
+        title: "🗑️ Danh sách phát bị xóa",
+        color: 15158332,
+        fields: [
+          { name: "Tên", value: formatText(previous[id].title), inline: false },
+          { name: "Thời gian", value: new Date().toLocaleString("vi-VN"), inline: true }
+        ]
+      });
+    }
+  }
+
+  // Thay đổi tên/mô tả + video thêm/xóa trong playlist còn tồn tại
+  for (const id in current) {
+    if (!previous[id]) continue;
+
+    const old = previous[id];
+    const now = current[id];
+    const fields = [];
+
+    if (old.title !== now.title) {
+      fields.push({ name: "Tên cũ", value: formatText(old.title), inline: false });
+      fields.push({ name: "Tên mới", value: formatText(now.title), inline: false });
+    }
+    if (old.description !== now.description) {
+      fields.push({ name: "Mô tả cũ", value: formatText(old.description), inline: false });
+      fields.push({ name: "Mô tả mới", value: formatText(now.description), inline: false });
+    }
+
+    if (fields.length > 0) {
+      fields.push({ name: "Thời gian", value: new Date().toLocaleString("vi-VN"), inline: true });
+      sendPlaylistDiscord({
+        title: "✏️ Danh sách phát có thay đổi: " + now.title,
+        color: 15844367,
+        fields: fields
+      });
+    }
+
+    // So sánh video trong playlist
+    const oldIds = new Set((old.items || []).map(i => i.videoId));
+    const newIds = new Set((now.items || []).map(i => i.videoId));
+
+    (now.items || []).forEach(item => {
+      if (!oldIds.has(item.videoId)) {
+        sendPlaylistDiscord({
+          title: "➕ Video được thêm vào playlist: " + now.title,
+          color: 3447003,
+          fields: [
+            { name: "Video", value: formatText(item.title), inline: false },
+            { name: "Liên kết", value: "https://www.youtube.com/watch?v=" + item.videoId, inline: false },
+            { name: "Thời gian", value: new Date().toLocaleString("vi-VN"), inline: true }
+          ]
+        });
+      }
+    });
+
+    (old.items || []).forEach(item => {
+      if (!newIds.has(item.videoId)) {
+        sendPlaylistDiscord({
+          title: "➖ Video bị xóa khỏi playlist: " + now.title,
+          color: 15105570,
+          fields: [
+            { name: "Video", value: formatText(item.title), inline: false },
+            { name: "Thời gian", value: new Date().toLocaleString("vi-VN"), inline: true }
+          ]
+        });
+      }
+    });
+  }
+
+  saveChunked(PL_PROP_PREFIX, current);
+}
