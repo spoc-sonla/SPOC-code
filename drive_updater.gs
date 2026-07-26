@@ -5,10 +5,10 @@ const ROOT_NAME = "SPOC";
 const PROP_PREFIX = "SNAP_";
 const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
 
-function fixSnapshot() {
-  initDriveSnapshot();
-  const check = loadSnapshot();
-  Logger.log("Số item saeu khi rebuild: " + Object.keys(check).length);
+function emergencyReset() {
+  PropertiesService.getScriptProperties().deleteProperty(TOKEN_PROP);
+  initDriveSnapshot(); // rebuild lại toàn bộ cây + lấy token mới nhất
+  Logger.log("Đã reset xong, số item: " + Object.keys(loadSnapshot()).length);
 }
 
 /* ================= THU THẬP TOÀN BỘ CÂY THƯ MỤC (dùng khi khởi tạo) ================= */
@@ -154,8 +154,23 @@ function updateDescendantPaths(snapshot, oldFullPath, newFullPath) {
   }
 }
 
-/* ================= HÀM CHÍNH — gắn vào trigger, chạy mỗi 1–5 phút ================= */
+/* ================= HÀM CHÍNH — gắn vào trigger ================= */
 function checkDriveFast() {
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log("checkDriveFast: đang có lần chạy khác, bỏ qua lần này");
+    return;
+  }
+
+  try {
+    checkDriveFast_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function checkDriveFast_() {
   const props = PropertiesService.getScriptProperties();
   let pageToken = props.getProperty(TOKEN_PROP);
 
@@ -181,7 +196,6 @@ function checkDriveFast() {
 
       const wasTracked = !!snapshot[fileId];
 
-      // --- Bị xóa / vào thùng rác ---
       if (change.removed || (change.file && change.file.trashed)) {
         if (wasTracked) {
           const old = snapshot[fileId];
@@ -194,7 +208,6 @@ function checkDriveFast() {
       if (!change.file) continue;
       const meta = change.file;
 
-      // --- Mới xuất hiện ---
       if (!wasTracked) {
         const entry = ensureInTree(fileId, snapshot, newlyAdded);
         if (entry) {
@@ -203,7 +216,6 @@ function checkDriveFast() {
         continue;
       }
 
-      // --- Đã theo dõi từ trước: kiểm tra move / rename / update ---
       const old = snapshot[fileId];
       const newModified = new Date(meta.modifiedTime).getTime();
       const newParentId = meta.parents ? meta.parents[0] : old.parentId;
@@ -218,7 +230,6 @@ function checkDriveFast() {
         const newParentEntry = getParentEntry(snapshot, newParentId);
 
         if (!newParentEntry) {
-          // Bị chuyển ra ngoài phạm vi thư mục đang theo dõi -> coi như đã xóa
           sendDiscord(old.isFolder ? "deleted_folder" : "deleted_file", old, old);
           delete snapshot[fileId];
           continue;
