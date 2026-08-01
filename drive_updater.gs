@@ -1,4 +1,4 @@
-const WEBHOOK_URL = "https://discord.com/api/webhooks/1523123920461627424/0ui0TszC0eX9PqSFurwT0Yn1XzqjmxZp0TjUzTRFV1LNz3GAS2u7c54u_GXXG_rXM1pM";
+const WEBHOOK_URL = "https://discord.com/api/webhooks/...";
 const FOLDER_ID = "1A5gyIKW9YOeYq8F11Pil1OBt55Lq8N5c";
 const ROOT_ID = FOLDER_ID;
 const ROOT_NAME = "SPOC";
@@ -364,15 +364,15 @@ function buildNotification(type, oldItem, newItem, modifiedBy, fromPath, toPath)
   return { type: type, color: cfg.color, text: line };
 }
 
-/* ================= GỬI GỘP NHIỀU THÔNG BÁO THÀNH ÍT EMBED / REQUEST NHẤT ================= */
+/* ================= GỬI GỘP NHIỀU THÔNG BÁO THÀNH ÍT EMBED ================= */
 function sendBatchedDiscord(notifications) {
   if (!notifications || notifications.length === 0) return;
 
   const now = new Date().toLocaleString("vi-VN");
-  const MAX_DESC_LENGTH = 3800;
-  const MAX_EMBEDS_PER_MESSAGE = 10;
+  const MAX_DESC_LENGTH = 3800;       // giới hạn Discord: 4096 ký tự/description
+  const MAX_TOTAL_PAYLOAD = 5500;     // chừa an toàn dưới giới hạn 6000 ký tự/message
 
-  // Gộp các dòng lại, cắt thành nhiều embed nếu tổng ký tự vượt giới hạn
+  // gộp các dòng thành từng embed
   const embeds = [];
   let currentLines = [];
   let currentLength = 0;
@@ -400,11 +400,41 @@ function sendBatchedDiscord(notifications) {
   }
   flushEmbed();
 
-  // Gửi theo lô, mỗi request tối đa MAX_EMBEDS_PER_MESSAGE embed
-  for (let i = 0; i < embeds.length; i += MAX_EMBEDS_PER_MESSAGE) {
-    const chunk = embeds.slice(i, i + MAX_EMBEDS_PER_MESSAGE);
-    postToDiscordWithRetry({ embeds: chunk });
+  // gộp các embed thành từng request
+  function embedSize(embed) {
+    return (embed.title ? embed.title.length : 0)
+         + (embed.description ? embed.description.length : 0)
+         + (embed.footer && embed.footer.text ? embed.footer.text.length : 0);
   }
+
+  let chunk = [];
+  let chunkSize = 0;
+
+  function flushChunk() {
+    if (chunk.length === 0) return;
+    postToDiscordWithRetry({ embeds: chunk });
+    chunk = [];
+    chunkSize = 0;
+  }
+
+  for (const embed of embeds) {
+    const size = embedSize(embed);
+
+    // Nếu 1 embed lẻ đã vượt giới hạn message -> gửi riêng nó luôn
+    if (size > MAX_TOTAL_PAYLOAD) {
+      flushChunk();
+      postToDiscordWithRetry({ embeds: [embed] });
+      continue;
+    }
+
+    if (chunkSize + size > MAX_TOTAL_PAYLOAD || chunk.length >= 10) {
+      flushChunk();
+    }
+
+    chunk.push(embed);
+    chunkSize += size;
+  }
+  flushChunk();
 }
 
 /* ================= GỬI 1 REQUEST TỚI DISCORD, TỰ RETRY NẾU BỊ RATE-LIMIT ================= */
