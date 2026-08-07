@@ -5,6 +5,18 @@ const ROOT_NAME = "SPOC";
 const PROP_PREFIX = "SNAP_";
 const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
 
+function debugPropsState() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  const snapKeys = Object.keys(all).filter(k => k.indexOf(PROP_PREFIX) === 0);
+  Logger.log("Các key SNAP_ hiện có: " + JSON.stringify(snapKeys));
+  Logger.log("COUNT hiện tại: " + props.getProperty(PROP_PREFIX + "COUNT"));
+
+  let totalSize = 0;
+  for (const k in all) totalSize += k.length + (all[k] ? all[k].length : 0);
+  Logger.log("Tổng dung lượng properties hiện tại (ký tự): " + totalSize);
+}
+
 function emergencyReset() {
   PropertiesService.getScriptProperties().deleteProperty(TOKEN_PROP);
   initDriveSnapshot(); // rebuild lại toàn bộ cây + lấy token mới nhất
@@ -57,11 +69,21 @@ function saveSnapshot(map) {
   const props = PropertiesService.getScriptProperties();
   const keys = Object.keys(map);
 
-  // Safeguard: không cho ghi snapshot rỗng nếu trước đó có dữ liệu, tránh mất toàn bộ cây theo dõi
-  if (keys.length === 0) {
-    const countStr = props.getProperty(PROP_PREFIX + "COUNT");
-    if (countStr && Number(countStr) > 0) {
-      throw new Error("saveSnapshot: từ chối ghi đè snapshot rỗng lên snapshot đang có dữ liệu");
+  const countStr = props.getProperty(PROP_PREFIX + "COUNT");
+  const hadPreviousData = countStr && Number(countStr) > 0;
+
+  if (hadPreviousData) {
+    const previous = loadSnapshot();
+    const previousCount = Object.keys(previous).length;
+
+    // Chặn nếu snapshot mới rỗng hoàn toàn
+    if (keys.length === 0) {
+      throw new Error("saveSnapshot: từ chối ghi đè snapshot rỗng lên snapshot đang có dữ liệu (trước đó có " + previousCount + " item)");
+    }
+
+    // Chặn nếu snapshot mới giảm bất thường (>50%) so với trước - dấu hiệu lỗi hàng loạt
+    if (previousCount > 20 && keys.length < previousCount * 0.5) {
+      throw new Error("saveSnapshot: từ chối ghi vì số item giảm bất thường (" + previousCount + " -> " + keys.length + "), có thể do lỗi API hàng loạt");
     }
   }
 
@@ -112,8 +134,7 @@ function initDriveSnapshot() {
   PropertiesService.getScriptProperties().setProperty(TOKEN_PROP, tokenRes.startPageToken);
 }
 
-/* ================= KIỂM TRA XEM 1 FILE/FOLDER CÓ NẰM TRONG CÂY ĐANG THEO DÕI KHÔNG =================
-   Nếu có mà chưa từng thấy -> tự đăng ký (dùng khi phát hiện item MỚI) */
+/* ================= KIỂM TRA XEM 1 FILE/FOLDER CÓ NẰM TRONG CÂY ĐANG THEO DÕI KHÔNG ================ */
 function ensureInTree(fileId, snapshot, newlyAdded) {
   if (fileId === ROOT_ID) return snapshot[ROOT_ID] || null;
   if (snapshot[fileId]) return snapshot[fileId];
@@ -122,6 +143,7 @@ function ensureInTree(fileId, snapshot, newlyAdded) {
   try {
     meta = Drive.Files.get(fileId, { fields: "id,name,mimeType,modifiedTime,parents,trashed,webViewLink,md5Checksum,headRevisionId" });
   } catch (e) {
+    Logger.log("ensureInTree lỗi khi lấy file " + fileId + ": " + e.message); // THÊM DÒNG NÀY
     return null;
   }
 
