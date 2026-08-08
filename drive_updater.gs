@@ -2,20 +2,9 @@ const WEBHOOK_URL = "https://discord.com/api/webhooks/...";
 const FOLDER_ID = "1A5gyIKW9YOeYq8F11Pil1OBt55Lq8N5c";
 const ROOT_ID = FOLDER_ID;
 const ROOT_NAME = "SPOC";
-const PROP_PREFIX = "SNAP_";
 const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
-
-function debugPropsState() {
-  const props = PropertiesService.getScriptProperties();
-  const all = props.getProperties();
-  const snapKeys = Object.keys(all).filter(k => k.indexOf(PROP_PREFIX) === 0);
-  Logger.log("Các key SNAP_ hiện có: " + JSON.stringify(snapKeys));
-  Logger.log("COUNT hiện tại: " + props.getProperty(PROP_PREFIX + "COUNT"));
-
-  let totalSize = 0;
-  for (const k in all) totalSize += k.length + (all[k] ? all[k].length : 0);
-  Logger.log("Tổng dung lượng properties hiện tại (ký tự): " + totalSize);
-}
+const SNAPSHOT_FILENAME = "_drive_monitor_snapshot.json";
+const SNAPSHOT_FILE_ID_PROP = "SNAPSHOT_FILE_ID";
 
 function emergencyReset() {
   PropertiesService.getScriptProperties().deleteProperty(TOKEN_PROP);
@@ -64,66 +53,74 @@ function collectAll(folder, path, parentId, map) {
   }
 }
 
-/* ================= LƯU / ĐỌC SNAPSHOT (chia chunk vì mỗi property tối đa ~9KB) ================= */
-function saveSnapshot(map) {
+/* ================= LƯU / ĐỌC SNAPSHOT (lưu dưới dạng 1 file JSON trên Drive) ================= */
+
+// Lấy (hoặc tạo mới nếu chưa có) file snapshot, trả về đối tượng File
+function getOrCreateSnapshotFile() {
   const props = PropertiesService.getScriptProperties();
+  const cachedId = props.getProperty(SNAPSHOT_FILE_ID_PROP);
+
+  if (cachedId) {
+    try {
+      const f = DriveApp.getFileById(cachedId);
+      if (!f.isTrashed()) return f;
+    } catch (e) {
+      // file id cũ không còn hợp lệ (đã bị xóa thủ công...), tạo lại bên dưới
+    }
+  }
+
+  // Tìm theo tên trong thư mục gốc trước khi tạo mới
+  const rootFolder = DriveApp.getFolderById(FOLDER_ID);
+  const it = DriveApp.getFilesByName(SNAPSHOT_FILENAME);
+  while (it.hasNext()) {
+    const f = it.next();
+    props.setProperty(SNAPSHOT_FILE_ID_PROP, f.getId());
+    return f;
+  }
+
+  const newFile = DriveApp.createFile(SNAPSHOT_FILENAME, "{}", MimeType.PLAIN_TEXT);
+  props.setProperty(SNAPSHOT_FILE_ID_PROP, newFile.getId());
+  return newFile;
+}
+
+function saveSnapshot(map) {
   const keys = Object.keys(map);
 
-  const countStr = props.getProperty(PROP_PREFIX + "COUNT");
-  const hadPreviousData = countStr && Number(countStr) > 0;
+  // Safeguard: không cho ghi snapshot rỗng nếu trước đó có dữ liệu, tránh mất toàn bộ cây theo dõi
+  const file = getOrCreateSnapshotFile();
+  const existingContent = file.getBlob().getDataAsString();
+  let previousCount = 0;
+  try {
+    previousCount = Object.keys(JSON.parse(existingContent || "{}")).length;
+  } catch (e) {
+    previousCount = 0;
+  }
 
-  if (hadPreviousData) {
-    const previous = loadSnapshot();
-    const previousCount = Object.keys(previous).length;
-
-    // Chặn nếu snapshot mới rỗng hoàn toàn
+  if (previousCount > 0) {
     if (keys.length === 0) {
       throw new Error("saveSnapshot: từ chối ghi đè snapshot rỗng lên snapshot đang có dữ liệu (trước đó có " + previousCount + " item)");
     }
-
     // Chặn nếu snapshot mới giảm bất thường (>50%) so với trước - dấu hiệu lỗi hàng loạt
     if (previousCount > 20 && keys.length < previousCount * 0.5) {
       throw new Error("saveSnapshot: từ chối ghi vì số item giảm bất thường (" + previousCount + " -> " + keys.length + "), có thể do lỗi API hàng loạt");
     }
   }
 
-  const all = props.getProperties();
-  for (const key in all) {
-    if (key.indexOf(PROP_PREFIX) === 0) props.deleteProperty(key);
-  }
-
-  const json = JSON.stringify(map);
-  const chunkSize = 8000;
-  const chunks = [];
-  for (let i = 0; i < json.length; i += chunkSize) {
-    chunks.push(json.substring(i, i + chunkSize));
-  }
-
-  const toSet = {};
-  chunks.forEach((c, i) => toSet[PROP_PREFIX + i] = c);
-  toSet[PROP_PREFIX + "COUNT"] = String(chunks.length);
-  props.setProperties(toSet, false);
+  file.setContent(JSON.stringify(map));
 }
 
 function loadSnapshot() {
-  const props = PropertiesService.getScriptProperties();
-  const countStr = props.getProperty(PROP_PREFIX + "COUNT");
-  if (!countStr) return {};
-
-  const count = Number(countStr);
-  let json = "";
-  for (let i = 0; i < count; i++) {
-    json += props.getProperty(PROP_PREFIX + i) || "";
-  }
-
+  const file = getOrCreateSnapshotFile();
+  const content = file.getBlob().getDataAsString();
+  if (!content) return {};
   try {
-    return JSON.parse(json);
+    return JSON.parse(content);
   } catch (e) {
     return {};
   }
 }
 
-/* ================= KHỞI TẠO (chạy 1 lần đầu tiên, hoặc khi cần reset) ================= */
+/* ================= KHỞI TẠO ================= */
 function initDriveSnapshot() {
   const rootFolder = DriveApp.getFolderById(FOLDER_ID);
   const current = {};
@@ -134,7 +131,7 @@ function initDriveSnapshot() {
   PropertiesService.getScriptProperties().setProperty(TOKEN_PROP, tokenRes.startPageToken);
 }
 
-/* ================= KIỂM TRA XEM 1 FILE/FOLDER CÓ NẰM TRONG CÂY ĐANG THEO DÕI KHÔNG ================ */
+/* ================= KIỂM TRA XEM 1 FILE/FOLDER CÓ NẰM TRONG CÂY ĐANG THEO DÕI KHÔNG =================*/
 function ensureInTree(fileId, snapshot, newlyAdded) {
   if (fileId === ROOT_ID) return snapshot[ROOT_ID] || null;
   if (snapshot[fileId]) return snapshot[fileId];
@@ -143,7 +140,7 @@ function ensureInTree(fileId, snapshot, newlyAdded) {
   try {
     meta = Drive.Files.get(fileId, { fields: "id,name,mimeType,modifiedTime,parents,trashed,webViewLink,md5Checksum,headRevisionId" });
   } catch (e) {
-    Logger.log("ensureInTree lỗi khi lấy file " + fileId + ": " + e.message); // THÊM DÒNG NÀY
+    Logger.log("ensureInTree lỗi khi lấy file " + fileId + ": " + e.message);
     return null;
   }
 
@@ -187,7 +184,7 @@ function updateDescendantPaths(snapshot, oldFullPath, newFullPath) {
   }
 }
 
-/* ================= HÀM CHÍNH — gắn vào trigger, chạy mỗi 1–5 phút ================= */
+/* ================= HÀM CHÍNH — gắn vào trigger ================= */
 function checkDriveFast() {
   const lock = LockService.getScriptLock();
   const gotLock = lock.tryLock(10000);
@@ -213,6 +210,7 @@ function checkDriveFast_() {
   }
 
   const snapshot = loadSnapshot();
+  const snapshotFileId = PropertiesService.getScriptProperties().getProperty(SNAPSHOT_FILE_ID_PROP);
   const newlyAdded = [];
   const pendingNotifications = [];
   let response;
@@ -227,6 +225,7 @@ function checkDriveFast_() {
     for (const change of (response.changes || [])) {
       const fileId = change.fileId;
       if (fileId === ROOT_ID) continue;
+      if (fileId === snapshotFileId) continue; // bỏ qua chính file snapshot, tránh tự báo cáo về mình
 
       const wasTracked = !!snapshot[fileId];
 
@@ -262,13 +261,10 @@ function checkDriveFast_() {
       let updated = false;
       if (!old.isFolder) {
         if (old.md5 != null && newMd5 != null) {
-          // File thường (pdf, ảnh, video, docx...): so sánh md5Checksum
           updated = old.md5 !== newMd5;
         } else if (old.headRevisionId != null && newHeadRevisionId != null) {
-          // Google-native file (Docs/Sheets/Slides...): so sánh headRevisionId
           updated = old.headRevisionId !== newHeadRevisionId;
         } else {
-          // Fallback hiếm gặp: không có cả 2 field, đành so sánh modifiedTime
           updated = old.lastUpdated !== newModified;
         }
       }
@@ -386,7 +382,7 @@ function buildNotification(type, oldItem, newItem, modifiedBy, fromPath, toPath)
   return { type: type, color: cfg.color, text: line };
 }
 
-/* ================= GỬI GỘP NHIỀU THÔNG BÁO THÀNH ÍT EMBED ================= */
+/* ================= GỬI GỘP NHIỀU THÔNG BÁO THÀNH ÍT EMBED / REQUEST NHẤT ================= */
 function sendBatchedDiscord(notifications) {
   if (!notifications || notifications.length === 0) return;
 
@@ -394,7 +390,6 @@ function sendBatchedDiscord(notifications) {
   const MAX_DESC_LENGTH = 3800;       // giới hạn Discord: 4096 ký tự/description
   const MAX_TOTAL_PAYLOAD = 5500;     // chừa an toàn dưới giới hạn 6000 ký tự/message
 
-  // gộp các dòng thành từng embed
   const embeds = [];
   let currentLines = [];
   let currentLength = 0;
@@ -422,7 +417,6 @@ function sendBatchedDiscord(notifications) {
   }
   flushEmbed();
 
-  // gộp các embed thành từng request
   function embedSize(embed) {
     return (embed.title ? embed.title.length : 0)
          + (embed.description ? embed.description.length : 0)
@@ -442,7 +436,6 @@ function sendBatchedDiscord(notifications) {
   for (const embed of embeds) {
     const size = embedSize(embed);
 
-    // Nếu 1 embed lẻ đã vượt giới hạn message -> gửi riêng nó luôn
     if (size > MAX_TOTAL_PAYLOAD) {
       flushChunk();
       postToDiscordWithRetry({ embeds: [embed] });
@@ -488,6 +481,5 @@ function postToDiscordWithRetry(payload) {
     return;
   }
 
-  // Delay nhẹ giữa các request khi có nhiều lô
   Utilities.sleep(350);
 }
