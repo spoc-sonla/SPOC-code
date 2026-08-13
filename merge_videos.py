@@ -6,14 +6,14 @@ import tempfile
 #  CAU HINH - chinh sua cac bien duoi day
 # ============================================================
 
-INPUT_DIR   = r""       # Thư mục chứa file MP4 nguồn
-OUTPUT_DIR  = r""      # Thư mục xuất file kết quả
+INPUT_DIR   = r"input"       # Thư mục chứa file MP4 nguồn
+OUTPUT_DIR  = r"output"      # Thư mục xuất file kết quả
 OUTPUT_NAME = "output.mp4"             # Tên file xuất
 
-PREFIX = "20260619"   # Tên file phải BẮT ĐẦU bằng chuỗi này (không phân biệt hoa thường)
+PREFIX = "NONE"   # Tên file phải BẮT ĐẦU bằng chuỗi này (không phân biệt hoa thường)
                   # Đặt "NONE" nếu không cần điều kiện này
 
-SUFFIX = "F"   # Tên file phải KẾT THÚC bằng chuỗi này (trước .mp4, không phân biệt hoa thường)
+SUFFIX = "NONE"   # Tên file phải KẾT THÚC bằng chuỗi này (trước .mp4, không phân biệt hoa thường)
                   # Đặt "NONE" nếu không cần điều kiện này
 
 SPEED  = 1.0      # Tốc độ phát (ví dụ: 2.0 = nhanh gấp đôi, 1.5 = nhanh gấp 1.5 lần)
