@@ -1,0 +1,90 @@
+(async function () {
+    let trustedURL;
+    if (window.trustedTypes && trustedTypes.createPolicy) {
+        const policy = trustedTypes.createPolicy("myPolicy", {
+            createScriptURL: (input) => input
+        });
+        trustedURL = policy.createScriptURL(
+            "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
+        );
+    } else {
+        console.warn("Trusted Types are not supported in this browser. Falling back to a plain URL.");
+        trustedURL = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+    }
+
+    function loadScript(src) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = src;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.body.appendChild(script);
+        });
+    }
+
+    await loadScript(trustedURL);
+
+    const { jsPDF } = window.jspdf;
+
+    // A4 portrait, mm units
+    const pdf = new jsPDF({
+        orientation: "p",
+        unit: "mm",
+        format: "a4",
+        compress: true
+    });
+
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+
+    const images = Array.from(document.querySelectorAll("img"))
+        .filter(img => /^blob:/.test(img.src));
+
+    for (let index = 0; index < images.length; index++) {
+        const img = images[index];
+
+        // Wait for image to be fully ready
+        if (!img.complete) {
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+            });
+        }
+
+        // Use the image's real pixel size, not displayed size
+        const sourceWidth = img.naturalWidth || img.width;
+        const sourceHeight = img.naturalHeight || img.height;
+
+        // Optional: oversample for better quality when source is CSS-scaled
+        const scale = 2;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = sourceWidth * scale;
+        canvas.height = sourceHeight * scale;
+
+        const ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, sourceWidth, sourceHeight);
+
+        // JPEG is usually smaller; PNG can look better for text/line art
+        const imgData = canvas.toDataURL("image/jpeg", 1.0);
+
+        // Fit image to page while keeping aspect ratio
+        const ratio = Math.min(pageWidth / sourceWidth, pageHeight / sourceHeight);
+        const pdfWidth = sourceWidth * ratio;
+        const pdfHeight = sourceHeight * ratio;
+
+        const x = (pageWidth - pdfWidth) / 2;
+        const y = (pageHeight - pdfHeight) / 2;
+
+        if (index > 0) {
+            pdf.addPage();
+        }
+
+        pdf.addImage(imgData, "JPEG", x, y, pdfWidth, pdfHeight, undefined, "SLOW");
+    }
+
+    pdf.save("download.pdf");
+})();
