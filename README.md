@@ -10,3 +10,4 @@ scribd_convert.py (python) là code chuyển tài liệu trên trang scribd sang
 
 download pdf code.txt (javascript) là đoạn code chạy trong console web để lấy tài liệu bị chặn tải xuống trên Google Doc
 
+download vbc document.txt (javascript) là đoạn code chạy trong console web để lấy tài liệu bị chặn tải xuống trên VBC
