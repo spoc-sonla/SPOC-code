@@ -1,0 +1,102 @@
+(async () => {
+  // Load jsPDF
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  const { jsPDF } = window.jspdf;
+
+  // Lấy các ảnh page/N đang có trên trang
+  const imgs = [...document.querySelectorAll('img[src*="/page/"]')]
+    .map(img => ({
+      page: Number(
+        (img.src.match(/\/page\/(\d+)/) || [])[1]
+      ),
+      src: img.src
+    }))
+    .filter(x => Number.isFinite(x.page))
+    .sort((a, b) => a.page - b.page);
+
+  if (!imgs.length) {
+    throw new Error("Không tìm thấy ảnh page/N trong DOM.");
+  }
+
+  console.log(`Tìm thấy ${imgs.length} trang`);
+
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`Không tải được: ${src}`));
+
+      // Cùng origin nên cookie phiên vẫn được dùng khi fetch bên dưới.
+      img.src = src;
+    });
+  }
+
+  function imageToDataURL(img) {
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+
+    return {
+      data: canvas.toDataURL("image/jpeg", 0.95),
+      width: img.naturalWidth,
+      height: img.naturalHeight
+    };
+  }
+
+  let pdf = null;
+
+  for (let i = 0; i < imgs.length; i++) {
+    const item = imgs[i];
+
+    console.log(`Đang xử lý trang ${item.page} (${i + 1}/${imgs.length})`);
+
+    const img = await loadImage(item.src);
+    const image = imageToDataURL(img);
+
+    // Giữ tỷ lệ ảnh, dùng kích thước ảnh làm kích thước trang PDF.
+    const orientation =
+      image.width >= image.height ? "landscape" : "portrait";
+
+    if (!pdf) {
+      pdf = new jsPDF({
+        orientation,
+        unit: "px",
+        format: [image.width, image.height],
+        compress: true
+      });
+    } else {
+      pdf.addPage(
+        [image.width, image.height],
+        orientation
+      );
+    }
+
+    pdf.addImage(
+      image.data,
+      "JPEG",
+      0,
+      0,
+      image.width,
+      image.height,
+      undefined,
+      "FAST"
+    );
+  }
+
+  pdf.save("VBC-document.pdf");
+
+  console.log("✓ Đã tải VBC-document.pdf");
+})();
