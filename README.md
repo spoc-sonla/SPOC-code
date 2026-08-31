@@ -11,3 +11,7 @@ scribd_convert.py (python) là code chuyển tài liệu trên trang scribd sang
 download pdf code.txt (javascript) là đoạn code chạy trong console web để lấy tài liệu bị chặn tải xuống trên Google Doc
 
 download vbc document.txt (javascript) là đoạn code chạy trong console web để lấy tài liệu bị chặn tải xuống trên VBC
+
+watermark_remove.py (python) là code xóa pdf watermark cho tài liệu VBC
+
+xray_pdf.py (python) là code soi những chi tiết màu xám nhỏ trong file pdf
