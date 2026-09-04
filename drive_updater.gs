@@ -12,44 +12,66 @@ function emergencyReset() {
   Logger.log("Đã reset xong, số item: " + Object.keys(loadSnapshot()).length);
 }
 
-/* ================= THU THẬP TOÀN BỘ CÂY THƯ MỤC (dùng khi khởi tạo) ================= */
-function collectAll(folder, path, parentId, map) {
-  map[folder.getId()] = {
-    name: folder.getName(),
+/* ================= THU THẬP TOÀN BỘ CÂY THƯ MỤC (dùng khi khởi tạo) =================
+   Dùng Drive.Files.list theo từng folder (lấy cả file lẫn folder con trong 1 lệnh gọi,
+   kèm sẵn md5Checksum/headRevisionId) thay vì gọi Drive.Files.get riêng lẻ cho từng file.
+   Giảm số lượng API call từ ~(số file) xuống còn ~(số folder), tránh vượt quá thời gian
+   thực thi tối đa 6 phút của Apps Script khi cây có nhiều file. */
+function collectAll(folderId, folderName, path, parentId, map) {
+  let rootLastUpdated = Date.now();
+  let rootUrl = "https://drive.google.com/drive/folders/" + folderId;
+  try {
+    const rootMeta = Drive.Files.get(folderId, { fields: "modifiedTime,webViewLink" });
+    rootLastUpdated = new Date(rootMeta.modifiedTime).getTime();
+    rootUrl = rootMeta.webViewLink || rootUrl;
+  } catch (e) {}
+
+  map[folderId] = {
+    name: folderName,
     path: path,
     parentId: parentId,
     isFolder: true,
-    lastUpdated: folder.getLastUpdated().getTime(),
-    url: folder.getUrl()
+    lastUpdated: rootLastUpdated,
+    url: rootUrl
   };
 
-  const files = folder.getFiles();
-  while (files.hasNext()) {
-    const f = files.next();
-    let md5 = null;
-    let headRevisionId = null;
-    try {
-      const meta = Drive.Files.get(f.getId(), { fields: "md5Checksum,headRevisionId" });
-      md5 = meta.md5Checksum || null;
-      headRevisionId = meta.headRevisionId || null;
-    } catch (e) {}
-    map[f.getId()] = {
-      name: f.getName(),
-      path: path,
-      parentId: folder.getId(),
-      isFolder: false,
-      lastUpdated: f.getLastUpdated().getTime(),
-      url: f.getUrl(),
-      md5: md5,
-      headRevisionId: headRevisionId
-    };
-  }
+  const subFolders = [];
+  let pageToken = null;
 
-  const folders = folder.getFolders();
-  while (folders.hasNext()) {
-    const sub = folders.next();
-    const newPath = path + "/" + sub.getName();
-    collectAll(sub, newPath, folder.getId(), map);
+  do {
+    const res = Drive.Files.list({
+      q: "'" + folderId + "' in parents and trashed = false",
+      fields: "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,md5Checksum,headRevisionId)",
+      pageSize: 1000,
+      pageToken: pageToken
+    });
+
+    const items = res.files || [];
+    for (const item of items) {
+      const isFolder = item.mimeType === "application/vnd.google-apps.folder";
+
+      if (isFolder) {
+        subFolders.push({ id: item.id, name: item.name });
+      } else {
+        map[item.id] = {
+          name: item.name,
+          path: path,
+          parentId: folderId,
+          isFolder: false,
+          lastUpdated: new Date(item.modifiedTime).getTime(),
+          url: item.webViewLink || ("https://drive.google.com/open?id=" + item.id),
+          md5: item.md5Checksum || null,
+          headRevisionId: item.headRevisionId || null
+        };
+      }
+    }
+
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+
+  for (const sub of subFolders) {
+    const newPath = path + "/" + sub.name;
+    collectAll(sub.id, sub.name, newPath, folderId, map);
   }
 }
 
@@ -116,9 +138,8 @@ function loadSnapshot() {
 
 /* ================= KHỞI TẠO (chạy 1 lần đầu tiên, hoặc khi cần reset) ================= */
 function initDriveSnapshot() {
-  const rootFolder = DriveApp.getFolderById(FOLDER_ID);
   const current = {};
-  collectAll(rootFolder, ROOT_NAME, null, current);
+  collectAll(FOLDER_ID, ROOT_NAME, ROOT_NAME, null, current);
   saveSnapshot(current);
 
   const tokenRes = Drive.Changes.getStartPageToken();
