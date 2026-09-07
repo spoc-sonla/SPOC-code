@@ -6,17 +6,211 @@ const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
 const SNAPSHOT_FILENAME = "_drive_monitor_snapshot.json"; // file ẩn lưu snapshot, nằm ngoài thư mục theo dõi
 const SNAPSHOT_FILE_ID_PROP = "SNAPSHOT_FILE_ID"; // lưu ID của file snapshot để truy cập nhanh, không cần tìm kiếm mỗi lần
 
+const BACKUP_MAX_COUNT = 2; // số thư mục sao lưu tối đa
+const BACKUP_MAX_RUNTIME_MS = 4.5 * 60 * 1000; // thời gian mỗi lần sao lưu 1 phần
+const BACKUP_STATE_PROP = "BACKUP_STATE";
+const BACKUP_CONTINUE_TRIGGER_FN = "continueBackup_";
+
+function resetBackupState() {
+  PropertiesService.getScriptProperties().deleteProperty("BACKUP_STATE");
+  Logger.log("Đã xóa state backup dở dang. Chạy lại backupSpoc() để bắt đầu lượt mới.");
+}
+
+// Điểm khởi đầu
+function backupFolder() {
+  const props = PropertiesService.getScriptProperties();
+  const existingState = props.getProperty(BACKUP_STATE_PROP);
+
+  if (existingState) {
+    Logger.log("Đang có 1 lượt sao lưu dở dang, tiếp tục lượt đó thay vì tạo mới.");
+    continueBackup_();
+    return;
+  }
+
+  cleanupOldBackups_();
+
+  const timestamp = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yy_HH-mm");
+  const backupName = "SPOC_" + timestamp;
+
+  const rootFolder = DriveApp.getFolderById(FOLDER_ID);
+  const parentOfRoot = rootFolder.getParents().hasNext() ? rootFolder.getParents().next() : DriveApp.getRootFolder();
+  const backupRoot = parentOfRoot.createFolder(backupName);
+
+  const state = {
+    phase: "listing", // "listing" (đang liệt kê danh sách) -> "copying" (đang copy) -> xong
+    listingQueue: [{ sourceId: FOLDER_ID, destId: backupRoot.getId() }], // hàng đợi các folder còn cần liệt kê
+    tasks: [], // danh sách tác vụ copy sẽ được điền dần trong lúc liệt kê
+    nextIndex: 0,
+    folderIdMap: { [FOLDER_ID]: backupRoot.getId() },
+    backupRootUrl: backupRoot.getUrl(),
+    backupName: backupName,
+    doneFiles: 0,
+    doneFolders: 0,
+    startedAt: Date.now()
+  };
+
+  props.setProperty(BACKUP_STATE_PROP, JSON.stringify(state));
+  Logger.log("Bắt đầu sao lưu \"" + backupName + "\" - đang liệt kê danh sách file...");
+
+  continueBackup_();
+}
+
+function continueBackup_() {
+  ensureContinueTriggerExists_();
+
+  const props = PropertiesService.getScriptProperties();
+  const stateStr = props.getProperty(BACKUP_STATE_PROP);
+  if (!stateStr) {
+    Logger.log("Không có lượt sao lưu nào đang chờ xử lý.");
+    deleteBackupTriggers_(); // không còn việc gì để làm, dọn trigger thừa
+    return;
+  }
+
+  const state = JSON.parse(stateStr);
+  const startTime = Date.now();
+
+  function timeUp() {
+    return Date.now() - startTime > BACKUP_MAX_RUNTIME_MS;
+  }
+
+  if (state.phase === "listing") {
+    while (state.listingQueue.length > 0) {
+      if (timeUp()) break;
+
+      const current = state.listingQueue.shift();
+      let pageToken = null;
+
+      do {
+        if (timeUp()) break;
+
+        const res = Drive.Files.list({
+          q: "'" + current.sourceId + "' in parents and trashed = false",
+          fields: "nextPageToken,files(id,name,mimeType)",
+          pageSize: 1000,
+          pageToken: pageToken
+        });
+
+        const items = res.files || [];
+        for (const item of items) {
+          if (item.mimeType === "application/vnd.google-apps.folder") {
+            state.tasks.push({ type: "folder", sourceId: item.id, name: item.name, sourceParentId: current.sourceId });
+            state.listingQueue.push({ sourceId: item.id, destId: null });
+          } else {
+            state.tasks.push({ type: "file", sourceId: item.id, name: item.name, sourceParentId: current.sourceId });
+          }
+        }
+
+        pageToken = res.nextPageToken;
+      } while (pageToken);
+    }
+
+    if (state.listingQueue.length === 0) {
+      state.phase = "copying";
+      Logger.log("Liệt kê hoàn tất: " + state.tasks.length + " mục. Bắt đầu copy...");
+    }
+  }
+
+  if (state.phase === "copying") {
+    while (state.nextIndex < state.tasks.length) {
+      if (timeUp()) break;
+
+      const task = state.tasks[state.nextIndex];
+      const destParentId = state.folderIdMap[task.sourceParentId];
+
+      try {
+        if (destParentId) {
+          if (task.type === "folder") {
+            const destParentFolder = DriveApp.getFolderById(destParentId);
+            const newFolder = destParentFolder.createFolder(task.name);
+            state.folderIdMap[task.sourceId] = newFolder.getId();
+            state.doneFolders++;
+          } else {
+            const sourceFile = DriveApp.getFileById(task.sourceId);
+            const destParentFolder = DriveApp.getFolderById(destParentId);
+            sourceFile.makeCopy(task.name, destParentFolder);
+            state.doneFiles++;
+          }
+        }
+      } catch (e) {
+        Logger.log("Lỗi khi xử lý \"" + task.name + "\": " + e.message + " - bỏ qua, tiếp tục mục tiếp theo.");
+      }
+
+      state.nextIndex++;
+    }
+  }
+
+  if (state.phase === "copying" && state.nextIndex >= state.tasks.length) {
+    props.deleteProperty(BACKUP_STATE_PROP);
+    deleteBackupTriggers_(); // xong việc, xóa trigger đã đặt sẵn ở đầu hàm
+    Logger.log("✅ Sao lưu \"" + state.backupName + "\" hoàn tất.");
+    Logger.log("Tổng cộng: " + state.doneFolders + " thư mục, " + state.doneFiles + " file.");
+    Logger.log("Link: " + state.backupRootUrl);
+    return;
+  }
+
+  // Chưa xong -> lưu tiến trình. Trigger kế tiếp đã được đặt sẵn ở đầu hàm rồi, không cần gọi lại.
+  props.setProperty(BACKUP_STATE_PROP, JSON.stringify(state));
+  const progressMsg = state.phase === "listing"
+    ? "đang liệt kê (" + state.tasks.length + " mục đã tìm thấy)..."
+    : "đã copy " + state.nextIndex + "/" + state.tasks.length + " mục...";
+  Logger.log("Chưa xong, " + progressMsg + " tiếp tục ở lượt chạy sau.");
+}
+
+function cleanupOldBackups_() {
+  const rootFolder = DriveApp.getFolderById(FOLDER_ID);
+  const parentOfRoot = rootFolder.getParents().hasNext() ? rootFolder.getParents().next() : DriveApp.getRootFolder();
+
+  const backupFolders = [];
+  const it = parentOfRoot.getFolders();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getName().indexOf("SPOC_") === 0) {
+      backupFolders.push({ folder: f, created: f.getDateCreated().getTime() });
+    }
+  }
+
+  const keepCount = Math.max(0, BACKUP_MAX_COUNT - 1);
+
+  if (backupFolders.length <= keepCount) {
+    Logger.log("Số bản sao lưu hiện có: " + backupFolders.length + " - chưa cần dọn dẹp trước khi backup mới.");
+    return;
+  }
+
+  backupFolders.sort((a, b) => a.created - b.created);
+
+  const toDeleteCount = backupFolders.length - keepCount;
+  for (let i = 0; i < toDeleteCount; i++) {
+    const target = backupFolders[i].folder;
+    Logger.log("Xóa bản sao lưu cũ trước khi backup mới: " + target.getName());
+    target.setTrashed(true);
+  }
+
+  Logger.log("Đã dọn dẹp " + toDeleteCount + " bản sao lưu cũ, còn lại " + keepCount + " bản, chuẩn bị tạo bản mới.");
+}
+
+function ensureContinueTriggerExists_() {
+  deleteBackupTriggers_();
+  ScriptApp.newTrigger(BACKUP_CONTINUE_TRIGGER_FN)
+    .timeBased()
+    .after(1 * 60 * 1000)
+    .create();
+}
+
+function deleteBackupTriggers_() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const t of triggers) {
+    if (t.getHandlerFunction() === BACKUP_CONTINUE_TRIGGER_FN) {
+      ScriptApp.deleteTrigger(t);
+    }
+  }
+}
+
 function emergencyReset() {
   PropertiesService.getScriptProperties().deleteProperty(TOKEN_PROP);
   initDriveSnapshot(); // rebuild lại toàn bộ cây + lấy token mới nhất
   Logger.log("Đã reset xong, số item: " + Object.keys(loadSnapshot()).length);
 }
 
-/* ================= THU THẬP TOÀN BỘ CÂY THƯ MỤC (dùng khi khởi tạo) =================
-   Dùng Drive.Files.list theo từng folder (lấy cả file lẫn folder con trong 1 lệnh gọi,
-   kèm sẵn md5Checksum/headRevisionId) thay vì gọi Drive.Files.get riêng lẻ cho từng file.
-   Giảm số lượng API call từ ~(số file) xuống còn ~(số folder), tránh vượt quá thời gian
-   thực thi tối đa 6 phút của Apps Script khi cây có nhiều file. */
 function collectAll(folderId, folderName, path, parentId, map) {
   let rootLastUpdated = Date.now();
   let rootUrl = "https://drive.google.com/drive/folders/" + folderId;
@@ -415,6 +609,12 @@ function getLastModifierName(fileId, isFolder, actionType) {
 
 /* ================= HÀM CHÍNH — gắn vào trigger, chạy mỗi 1–5 phút ================= */
 function checkDriveFast() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(BACKUP_STATE_PROP)) {
+    Logger.log("checkDriveFast: đang trong quá trình sao lưu, bỏ qua lần kiểm tra này.");
+    return;
+  }
+
   const lock = LockService.getScriptLock();
   const gotLock = lock.tryLock(10000);
   if (!gotLock) {
