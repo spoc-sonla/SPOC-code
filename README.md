@@ -12,8 +12,8 @@ download pdf code.txt (javascript) là đoạn code chạy trong console web đ�
 
 download vbc document.txt (javascript) là đoạn code chạy trong console web để lấy tài liệu bị chặn tải xuống trên VBC
 
-watermark_remove.py (python) là code xóa pdf watermark cho tài liệu VBC
+watermark_remove.py (python) là code xóa pdf watermark cho tài liệu VBC(đang nghiên cứu, chưa sử dụng được)
 
-xray_pdf.py (python) là code soi những chi tiết màu xám nhỏ trong file pdf
+xray_pdf.py (python) là code soi những chi tiết màu xám nhỏ trong file pdf(đang nghiên cứu, chưa sử dụng được)
 
 pdf6.py (python) là code chia các file pdf thành n/i file(n là số trang file gốc, i là số trang file sau khi chia)
