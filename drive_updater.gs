@@ -5,204 +5,10 @@ const ROOT_NAME = "SPOC";
 const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
 const SNAPSHOT_FILENAME = "_drive_monitor_snapshot.json"; // file ẩn lưu snapshot, nằm ngoài thư mục theo dõi
 const SNAPSHOT_FILE_ID_PROP = "SNAPSHOT_FILE_ID"; // lưu ID của file snapshot để truy cập nhanh, không cần tìm kiếm mỗi lần
+const WORKER_URL = "https://name.workers.dev";
 
-const BACKUP_MAX_COUNT = 2; // số thư mục sao lưu tối đa
-const BACKUP_MAX_RUNTIME_MS = 4.5 * 60 * 1000; // thời gian mỗi lần sao lưu 1 phần
-const BACKUP_STATE_PROP = "BACKUP_STATE";
-const BACKUP_CONTINUE_TRIGGER_FN = "continueBackup_";
-
-function resetBackupState() {
-  PropertiesService.getScriptProperties().deleteProperty("BACKUP_STATE");
-  Logger.log("Đã xóa state backup dở dang. Chạy lại backupSpoc() để bắt đầu lượt mới.");
-}
-
-// Điểm khởi đầu
-function backupFolder() {
-  const props = PropertiesService.getScriptProperties();
-  const existingState = props.getProperty(BACKUP_STATE_PROP);
-
-  if (existingState) {
-    Logger.log("Đang có 1 lượt sao lưu dở dang, tiếp tục lượt đó thay vì tạo mới.");
-    continueBackup_();
-    return;
-  }
-
-  cleanupOldBackups_();
-
-  const timestamp = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yy_HH-mm");
-  const backupName = "SPOC_" + timestamp;
-
-  const rootFolder = DriveApp.getFolderById(FOLDER_ID);
-  const parentOfRoot = rootFolder.getParents().hasNext() ? rootFolder.getParents().next() : DriveApp.getRootFolder();
-  const backupRoot = parentOfRoot.createFolder(backupName);
-
-  const state = {
-    phase: "listing", // "listing" (đang liệt kê danh sách) -> "copying" (đang copy) -> xong
-    listingQueue: [{ sourceId: FOLDER_ID, destId: backupRoot.getId() }], // hàng đợi các folder còn cần liệt kê
-    tasks: [], // danh sách tác vụ copy sẽ được điền dần trong lúc liệt kê
-    nextIndex: 0,
-    folderIdMap: { [FOLDER_ID]: backupRoot.getId() },
-    backupRootUrl: backupRoot.getUrl(),
-    backupName: backupName,
-    doneFiles: 0,
-    doneFolders: 0,
-    startedAt: Date.now()
-  };
-
-  props.setProperty(BACKUP_STATE_PROP, JSON.stringify(state));
-  Logger.log("Bắt đầu sao lưu \"" + backupName + "\" - đang liệt kê danh sách file...");
-
-  continueBackup_();
-}
-
-function continueBackup_() {
-  ensureContinueTriggerExists_();
-
-  const props = PropertiesService.getScriptProperties();
-  const stateStr = props.getProperty(BACKUP_STATE_PROP);
-  if (!stateStr) {
-    Logger.log("Không có lượt sao lưu nào đang chờ xử lý.");
-    deleteBackupTriggers_(); // không còn việc gì để làm, dọn trigger thừa
-    return;
-  }
-
-  const state = JSON.parse(stateStr);
-  const startTime = Date.now();
-
-  function timeUp() {
-    return Date.now() - startTime > BACKUP_MAX_RUNTIME_MS;
-  }
-
-  if (state.phase === "listing") {
-    while (state.listingQueue.length > 0) {
-      if (timeUp()) break;
-
-      const current = state.listingQueue.shift();
-      let pageToken = null;
-
-      do {
-        if (timeUp()) break;
-
-        const res = Drive.Files.list({
-          q: "'" + current.sourceId + "' in parents and trashed = false",
-          fields: "nextPageToken,files(id,name,mimeType)",
-          pageSize: 1000,
-          pageToken: pageToken
-        });
-
-        const items = res.files || [];
-        for (const item of items) {
-          if (item.mimeType === "application/vnd.google-apps.folder") {
-            state.tasks.push({ type: "folder", sourceId: item.id, name: item.name, sourceParentId: current.sourceId });
-            state.listingQueue.push({ sourceId: item.id, destId: null });
-          } else {
-            state.tasks.push({ type: "file", sourceId: item.id, name: item.name, sourceParentId: current.sourceId });
-          }
-        }
-
-        pageToken = res.nextPageToken;
-      } while (pageToken);
-    }
-
-    if (state.listingQueue.length === 0) {
-      state.phase = "copying";
-      Logger.log("Liệt kê hoàn tất: " + state.tasks.length + " mục. Bắt đầu copy...");
-    }
-  }
-
-  if (state.phase === "copying") {
-    while (state.nextIndex < state.tasks.length) {
-      if (timeUp()) break;
-
-      const task = state.tasks[state.nextIndex];
-      const destParentId = state.folderIdMap[task.sourceParentId];
-
-      try {
-        if (destParentId) {
-          if (task.type === "folder") {
-            const destParentFolder = DriveApp.getFolderById(destParentId);
-            const newFolder = destParentFolder.createFolder(task.name);
-            state.folderIdMap[task.sourceId] = newFolder.getId();
-            state.doneFolders++;
-          } else {
-            const sourceFile = DriveApp.getFileById(task.sourceId);
-            const destParentFolder = DriveApp.getFolderById(destParentId);
-            sourceFile.makeCopy(task.name, destParentFolder);
-            state.doneFiles++;
-          }
-        }
-      } catch (e) {
-        Logger.log("Lỗi khi xử lý \"" + task.name + "\": " + e.message + " - bỏ qua, tiếp tục mục tiếp theo.");
-      }
-
-      state.nextIndex++;
-    }
-  }
-
-  if (state.phase === "copying" && state.nextIndex >= state.tasks.length) {
-    props.deleteProperty(BACKUP_STATE_PROP);
-    deleteBackupTriggers_(); // xong việc, xóa trigger đã đặt sẵn ở đầu hàm
-    Logger.log("✅ Sao lưu \"" + state.backupName + "\" hoàn tất.");
-    Logger.log("Tổng cộng: " + state.doneFolders + " thư mục, " + state.doneFiles + " file.");
-    Logger.log("Link: " + state.backupRootUrl);
-    return;
-  }
-
-  // Chưa xong -> lưu tiến trình. Trigger kế tiếp đã được đặt sẵn ở đầu hàm rồi, không cần gọi lại.
-  props.setProperty(BACKUP_STATE_PROP, JSON.stringify(state));
-  const progressMsg = state.phase === "listing"
-    ? "đang liệt kê (" + state.tasks.length + " mục đã tìm thấy)..."
-    : "đã copy " + state.nextIndex + "/" + state.tasks.length + " mục...";
-  Logger.log("Chưa xong, " + progressMsg + " tiếp tục ở lượt chạy sau.");
-}
-
-function cleanupOldBackups_() {
-  const rootFolder = DriveApp.getFolderById(FOLDER_ID);
-  const parentOfRoot = rootFolder.getParents().hasNext() ? rootFolder.getParents().next() : DriveApp.getRootFolder();
-
-  const backupFolders = [];
-  const it = parentOfRoot.getFolders();
-  while (it.hasNext()) {
-    const f = it.next();
-    if (f.getName().indexOf("SPOC_") === 0) {
-      backupFolders.push({ folder: f, created: f.getDateCreated().getTime() });
-    }
-  }
-
-  const keepCount = Math.max(0, BACKUP_MAX_COUNT - 1);
-
-  if (backupFolders.length <= keepCount) {
-    Logger.log("Số bản sao lưu hiện có: " + backupFolders.length + " - chưa cần dọn dẹp trước khi backup mới.");
-    return;
-  }
-
-  backupFolders.sort((a, b) => a.created - b.created);
-
-  const toDeleteCount = backupFolders.length - keepCount;
-  for (let i = 0; i < toDeleteCount; i++) {
-    const target = backupFolders[i].folder;
-    Logger.log("Xóa bản sao lưu cũ trước khi backup mới: " + target.getName());
-    target.setTrashed(true);
-  }
-
-  Logger.log("Đã dọn dẹp " + toDeleteCount + " bản sao lưu cũ, còn lại " + keepCount + " bản, chuẩn bị tạo bản mới.");
-}
-
-function ensureContinueTriggerExists_() {
-  deleteBackupTriggers_();
-  ScriptApp.newTrigger(BACKUP_CONTINUE_TRIGGER_FN)
-    .timeBased()
-    .after(1 * 60 * 1000)
-    .create();
-}
-
-function deleteBackupTriggers_() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (const t of triggers) {
-    if (t.getHandlerFunction() === BACKUP_CONTINUE_TRIGGER_FN) {
-      ScriptApp.deleteTrigger(t);
-    }
-  }
+function taoSecret() {
+  Logger.log(Utilities.getUuid() + Utilities.getUuid().replace(/-/g, ""));
 }
 
 function emergencyReset() {
@@ -211,6 +17,9 @@ function emergencyReset() {
   Logger.log("Đã reset xong, số item: " + Object.keys(loadSnapshot()).length);
 }
 
+/* ================= THU THẬP TOÀN BỘ CÂY THƯ MỤC (dùng khi khởi tạo) =================
+   Dùng Drive.Files.list theo từng folder (lấy cả file lẫn folder con trong 1 lệnh gọi,
+   kèm sẵn md5Checksum/headRevisionId) thay vì gọi Drive.Files.get riêng lẻ cho từng file. */
 function collectAll(folderId, folderName, path, parentId, map) {
   let rootLastUpdated = Date.now();
   let rootUrl = "https://drive.google.com/drive/folders/" + folderId;
@@ -355,8 +164,6 @@ function ensureInTree(fileId, snapshot, newlyAdded) {
   }
 
   if (meta.trashed) {
-    // Có thể là false-positive tạm thời (Drive API đôi khi báo trashed=true sai lệch lúc move/tạo nhanh).
-    // Xác minh lại trước khi bỏ qua hẳn item này.
     try {
       const recheck = Drive.Files.get(fileId, { fields: "trashed" });
       if (recheck.trashed) return null; // xác nhận thực sự đã bị xóa
@@ -404,217 +211,8 @@ function updateDescendantPaths(snapshot, oldFullPath, newFullPath) {
   }
 }
 
-/* ================= BẢNG ÁNH XẠ personName -> EMAIL + TÊN HIỂN THỊ (lưu dưới dạng file CSV trên Drive) =================
-   Khi gặp 1 personName chưa từng biết, code tự động thêm dòng mới vào CSV với tên "Chưa xác định".
-   Muốn đặt tên thật cho người đó, chỉ cần mở file CSV trên Drive và sửa cột "ten_hien_thi",
-   không cần sửa code. */
-const USER_MAP_FILENAME = "_drive_monitor_user_map.csv";
-const USER_MAP_FILE_ID_PROP = "USER_MAP_FILE_ID";
-
-function getOrCreateUserMapFile() {
-  const props = PropertiesService.getScriptProperties();
-  const cachedId = props.getProperty(USER_MAP_FILE_ID_PROP);
-
-  if (cachedId) {
-    try {
-      const f = DriveApp.getFileById(cachedId);
-      if (!f.isTrashed()) return f;
-    } catch (e) {}
-  }
-
-  const it = DriveApp.getFilesByName(USER_MAP_FILENAME);
-  while (it.hasNext()) {
-    const f = it.next();
-    props.setProperty(USER_MAP_FILE_ID_PROP, f.getId());
-    return f;
-  }
-
-  const header = "personName,email,ten_hien_thi\n";
-  const newFile = DriveApp.createFile(USER_MAP_FILENAME, header, MimeType.PLAIN_TEXT);
-  props.setProperty(USER_MAP_FILE_ID_PROP, newFile.getId());
-  return newFile;
-}
-
-// Parse CSV đơn giản (không có dấu phẩy trong giá trị nên không cần parser phức tạp)
-// map dạng: { personName: { email: "...", name: "..." } }
-function loadUserMap() {
-  const file = getOrCreateUserMapFile();
-  const content = file.getBlob().getDataAsString();
-  const map = {};
-
-  const lines = content.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-  for (let i = 1; i < lines.length; i++) { // bỏ dòng header
-    const parts = lines[i].split(",");
-    if (parts.length >= 3) {
-      const personName = parts[0].trim();
-      const email = parts[1].trim();
-      const displayName = parts.slice(2).join(",").trim(); // phòng trường hợp tên có dấu phẩy
-      if (personName) map[personName] = { email: email, name: displayName };
-    }
-  }
-  return map;
-}
-
-function saveUserMap(map) {
-  const file = getOrCreateUserMapFile();
-  let content = "personName,email,ten_hien_thi\n";
-  for (const personName in map) {
-    const entry = map[personName];
-    content += personName + "," + (entry.email || "") + "," + (entry.name || "Chưa xác định") + "\n";
-  }
-  file.setContent(content);
-}
-
-// Tra tên theo personName. Nếu chưa có trong CSV, tự động thêm dòng mới với tên "Chưa xác định" và lưu lại ngay.
-function resolveOrRegisterPersonName(personName) {
-  const map = loadUserMap();
-
-  if (map[personName]) {
-    return map[personName].name || "Chưa xác định";
-  }
-
-  // Người mới, chưa từng gặp -> thêm vào CSV với tên mặc định, chưa có email
-  map[personName] = { email: "", name: "Chưa xác định" };
-  saveUserMap(map);
-  Logger.log("Đã thêm người dùng mới vào CSV: " + personName + " (tên mặc định: Chưa xác định). Mở file " + USER_MAP_FILENAME + " trên Drive để đặt tên thật.");
-  return "Chưa xác định";
-}
-
-// Gọi khi ta CHẮC CHẮN biết được email + tên thật của 1 personName (ví dụ qua Revisions API lúc update file).
-// Tự động điền vào CSV, và nếu người đó đang là "Chưa xác định" thì nâng cấp thành tên thật luôn.
-function learnPersonInfo(personName, email, displayName) {
-  if (!personName || (!email && !displayName)) return;
-
-  const map = loadUserMap();
-  const existing = map[personName];
-
-  const finalEmail = email || (existing ? existing.email : "");
-  // Chỉ ghi đè tên nếu: chưa có entry, hoặc tên hiện tại đang là "Chưa xác định"/rỗng
-  let finalName = existing ? existing.name : null;
-  if (!finalName || finalName === "Chưa xác định") {
-    finalName = displayName || email || "Chưa xác định";
-  }
-
-  const changed = !existing || existing.email !== finalEmail || existing.name !== finalName;
-  if (changed) {
-    map[personName] = { email: finalEmail, name: finalName };
-    saveUserMap(map);
-    Logger.log("Đã cập nhật thông tin cho " + personName + ": email=" + finalEmail + ", tên=" + finalName);
-  }
-}
-
-/* ================= LẤY personName THÔ TỪ ACTIVITY (không resolve tên, dùng để đối chiếu chéo với Revisions) ================= */
-function getPersonNameFromActivity(fileId) {
-  try {
-    const response = DriveActivity.Activity.query({
-      itemName: "items/" + fileId,
-      pageSize: 5,
-      consolidationStrategy: { legacy: {} }
-    });
-    const activities = response.activities || [];
-    for (const act of activities) {
-      const actors = act.actors || [];
-      for (const actor of actors) {
-        if (actor.system) continue;
-        if (actor.user && actor.user.knownUser && actor.user.knownUser.personName) {
-          return actor.user.knownUser.personName;
-        }
-      }
-    }
-  } catch (e) {}
-  return null;
-}
-
-/* ================= LẤY TÊN NGƯỜI VỪA XÓA / DI CHUYỂN / ĐỔI TÊN (dùng Drive Activity API + CSV đã học) =================
-   Dùng cho các hành động mà Revisions API không có: delete, move, rename. */
-function getActorNameFromActivity(fileId) {
-  try {
-    const response = DriveActivity.Activity.query({
-      itemName: "items/" + fileId,
-      pageSize: 10,
-      consolidationStrategy: { legacy: {} }
-    });
-
-    const activities = response.activities || [];
-    Logger.log("getActorNameFromActivity: " + activities.length + " activity cho file " + fileId);
-
-    for (const act of activities) {
-      const actors = act.actors || [];
-      for (const actor of actors) {
-        if (actor.system) continue;
-
-        if (actor.user && actor.user.deletedUser) return "(người dùng đã xóa)";
-
-        if (actor.user && actor.user.knownUser) {
-          if (actor.user.knownUser.isCurrentUser) {
-            const selfEmail = Session.getActiveUser().getEmail();
-            return selfEmail || "Bạn";
-          }
-
-          const personName = actor.user.knownUser.personName;
-          Logger.log("Actor personName: " + personName);
-
-          if (personName) {
-            return resolveOrRegisterPersonName(personName);
-          }
-
-          return "Người dùng khác (không rõ)";
-        }
-      }
-    }
-  } catch (e) {
-    Logger.log("getActorNameFromActivity lỗi cho file " + fileId + ": " + e.message);
-  }
-  return null;
-}
-
-/* ================= HÀM TỔNG HỢP: chọn nguồn phù hợp theo loại hành động ================= */
-function getLastModifierName(fileId, isFolder, actionType) {
-  // Với update nội dung file: lấy tên+email chắc chắn từ Revisions API,
-  // đồng thời "học" luôn thông tin này vào CSV gắn với personName tương ứng (nếu tìm được qua Activity)
-  if (actionType === "updated" && !isFolder) {
-    let viaRevisions = null;
-    let revisionEmail = null;
-    let revisionName = null;
-    try {
-      const res = Drive.Revisions.list(fileId, { fields: "revisions(lastModifyingUser(displayName,emailAddress))" });
-      const revisions = res.revisions || [];
-      if (revisions.length > 0) {
-        const last = revisions[revisions.length - 1];
-        if (last.lastModifyingUser) {
-          revisionEmail = last.lastModifyingUser.emailAddress || null;
-          revisionName = last.lastModifyingUser.displayName || null;
-          viaRevisions = revisionName || revisionEmail || null;
-        }
-      }
-    } catch (e) {}
-
-    // Gọi Activity API đúng 1 lần: vừa để "dạy" CSV, vừa dùng luôn kết quả này nếu Revisions không có gì
-    const personName = getPersonNameFromActivity(fileId);
-    if (personName && (revisionEmail || revisionName)) {
-      learnPersonInfo(personName, revisionEmail, revisionName);
-    }
-
-    if (viaRevisions) return viaRevisions;
-
-    // Revisions không có dữ liệu -> dùng lại personName đã lấy được ở trên, không gọi Activity lần nữa
-    if (personName) {
-      return resolveOrRegisterPersonName(personName);
-    }
-  }
-
-  // Với delete/move/rename hoặc khi Revisions không có dữ liệu: dùng Activity + CSV đã học được
-  return getActorNameFromActivity(fileId);
-}
-
 /* ================= HÀM CHÍNH — gắn vào trigger, chạy mỗi 1–5 phút ================= */
 function checkDriveFast() {
-  const props = PropertiesService.getScriptProperties();
-  if (props.getProperty(BACKUP_STATE_PROP)) {
-    Logger.log("checkDriveFast: đang trong quá trình sao lưu, bỏ qua lần kiểm tra này.");
-    return;
-  }
-
   const lock = LockService.getScriptLock();
   const gotLock = lock.tryLock(10000);
   if (!gotLock) {
@@ -640,7 +238,6 @@ function checkDriveFast_() {
 
   const snapshot = loadSnapshot();
   const snapshotFileId = props.getProperty(SNAPSHOT_FILE_ID_PROP);
-  const userMapFileId = props.getProperty(USER_MAP_FILE_ID_PROP);
   const newlyAdded = [];
   const pendingNotifications = [];
   let response;
@@ -665,14 +262,8 @@ function checkDriveFast_() {
       const fileId = change.fileId;
       if (fileId === ROOT_ID) continue;
       if (fileId === snapshotFileId) continue; // bỏ qua chính file snapshot, tránh tự báo cáo về mình
-      if (fileId === userMapFileId) continue; // bỏ qua chính file CSV ánh xạ tên người dùng
 
       const wasTracked = !!snapshot[fileId];
-
-      // --- Bị xóa / vào thùng rác ---
-      // Lưu ý: Drive Changes API đôi khi trả trashed=true tạm thời trong lúc thực hiện move
-      // (đặc biệt qua thao tác kéo-thả hoặc đồng bộ desktop). Để tránh báo nhầm "xóa" khi
-      // thực chất chỉ là "di chuyển", xác minh lại trạng thái thật của file trước khi kết luận.
       if (change.removed || (change.file && change.file.trashed)) {
         if (wasTracked) {
           let reallyDeleted = true;
@@ -682,10 +273,8 @@ function checkDriveFast_() {
             try {
               const freshMeta = Drive.Files.get(fileId, { fields: "id,trashed,parents,name,mimeType,modifiedTime,webViewLink,md5Checksum,headRevisionId" });
               if (!freshMeta.trashed) {
-                // Thực ra file/folder vẫn tồn tại bình thường -> đây là false positive, xử lý như 1 thay đổi thường
-                // (rename/move/update) thay vì xóa. Đưa fileId trở lại hàng đợi xử lý bình thường.
                 reallyDeleted = false;
-                change.file = freshMeta; // cập nhật lại meta đúng để nhánh xử lý bên dưới dùng
+                change.file = freshMeta;
               }
             } catch (e) {
               // Không lấy được -> có khả năng thực sự đã bị xóa hẳn (không phải chỉ trash), giữ nguyên reallyDeleted = true
@@ -694,15 +283,12 @@ function checkDriveFast_() {
 
           if (reallyDeleted) {
             const old = snapshot[fileId];
-            const modifiedBy = getActorNameFromActivity(fileId);
-            pendingNotifications.push(buildNotification(old.isFolder ? "deleted_folder" : "deleted_file", old, old, modifiedBy));
+            pendingNotifications.push(buildNotification(old.isFolder ? "deleted_folder" : "deleted_file", old, old));
             delete snapshot[fileId];
             continue;
           }
           // reallyDeleted = false -> rơi xuống để xử lý như thay đổi bình thường bên dưới, không "continue" ở đây
         } else {
-          // Item chưa từng được track: vẫn có thể là false-positive trashed (vừa tạo + move nhanh).
-          // Xác minh lại trước khi bỏ qua hẳn, để không bỏ lỡ báo cáo "file/folder mới".
           if (!change.removed) {
             try {
               const freshMeta = Drive.Files.get(fileId, { fields: "id,trashed,parents,name,mimeType,modifiedTime,webViewLink,md5Checksum,headRevisionId" });
@@ -727,8 +313,7 @@ function checkDriveFast_() {
       if (!wasTracked) {
         const entry = ensureInTree(fileId, snapshot, newlyAdded);
         if (entry) {
-          const modifiedBy = getLastModifierName(fileId, entry.isFolder, "new");
-          pendingNotifications.push(buildNotification(entry.isFolder ? "new_folder" : "new_file", entry, entry, modifiedBy));
+          pendingNotifications.push(buildNotification(entry.isFolder ? "new_folder" : "new_file", entry, entry));
         }
         continue;
       }
@@ -756,13 +341,6 @@ function checkDriveFast_() {
 
       const moved = newParentId !== old.parentId;
 
-      // Chỉ gọi API lấy tên người sửa 1 lần cho file này nếu có ít nhất 1 loại thay đổi thật sự xảy ra
-      let modifiedBy = null;
-      if (moved || renamed || updated) {
-        const actionTypeForLookup = updated ? "updated" : (moved ? "moved" : "renamed");
-        modifiedBy = getLastModifierName(fileId, old.isFolder, actionTypeForLookup);
-      }
-
       let newLocationPath = old.path;
 
       if (moved) {
@@ -770,7 +348,7 @@ function checkDriveFast_() {
 
         if (!newParentEntry) {
           // Bị chuyển ra ngoài phạm vi thư mục đang theo dõi -> coi như đã xóa
-          pendingNotifications.push(buildNotification(old.isFolder ? "deleted_folder" : "deleted_file", old, old, modifiedBy));
+          pendingNotifications.push(buildNotification(old.isFolder ? "deleted_folder" : "deleted_file", old, old));
           delete snapshot[fileId];
           continue;
         }
@@ -791,7 +369,6 @@ function checkDriveFast_() {
           "moved",
           old,
           { name: meta.name, path: newLocationPath, parentId: newParentId, isFolder: old.isFolder, lastUpdated: newModified, url: old.url },
-          modifiedBy,
           oldFullPath,
           newFullPath
         ));
@@ -809,11 +386,11 @@ function checkDriveFast_() {
       };
 
       if (renamed && updated) {
-        pendingNotifications.push(buildNotification("renamed_and_updated", old, finalEntry, modifiedBy));
+        pendingNotifications.push(buildNotification("renamed_and_updated", old, finalEntry));
       } else if (renamed) {
-        pendingNotifications.push(buildNotification("renamed", old, finalEntry, modifiedBy));
+        pendingNotifications.push(buildNotification("renamed", old, finalEntry));
       } else if (updated) {
-        pendingNotifications.push(buildNotification("updated", old, finalEntry, modifiedBy));
+        pendingNotifications.push(buildNotification("updated", old, finalEntry));
       }
 
       snapshot[fileId] = finalEntry;
@@ -837,7 +414,7 @@ function formatFileName(text) {
 }
 
 /* ================= XÂY DỰNG 1 "MỤC THÔNG BÁO" (chưa gửi, chỉ build data) ================= */
-function buildNotification(type, oldItem, newItem, modifiedBy, fromPath, toPath) {
+function buildNotification(type, oldItem, newItem, fromPath, toPath) {
   const CONFIG = {
     new_file:            { emoji: "📄", label: "File mới",             color: 3066993 },
     new_folder:          { emoji: "📁", label: "Thư mục mới",          color: 3066993 },
@@ -866,10 +443,6 @@ function buildNotification(type, oldItem, newItem, modifiedBy, fromPath, toPath)
     line = `${cfg.emoji} **${cfg.label}**\n`
          + `Tên: ${formatFileName(newItem.name)}\n`
          + `🎯 ${formatFileName(newItem.path)}`;
-  }
-
-  if (modifiedBy) {
-    line += `\n👤 Người sửa: ${modifiedBy}`;
   }
 
   if (type !== "deleted_file" && type !== "deleted_folder" && newItem.url) {
@@ -979,4 +552,131 @@ function postToDiscordWithRetry(payload) {
   }
 
   Utilities.sleep(350);
+}
+
+// ================= WEB APP: RANDOM FILE OPENER =================
+
+const CASE_OPENING_ALLOWED_EXTENSIONS = [".docx", ".pdf"];
+const CASE_OPENING_TICKET_TTL_SECONDS = 120; // ticket hết hạn sau 2 phút nếu không reveal kịp
+// const CASE_OPENING_SECRET = "806f239e-0a9f-4e9a-8b07-88835bf8b98c4e990e1edbeb408d962c2ac669d75dff";
+
+function doGet(e) {
+  const token = e.parameter.token;
+  if (token !== CASE_OPENING_SECRET) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ error: "Unauthorized" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const action = e.parameter.action;
+
+  let result;
+  if (action === "list") {
+    result = handleCaseOpeningList_();
+  } else if (action === "reveal") {
+    result = handleCaseOpeningReveal_(e.parameter.ticket);
+  } else {
+    result = { error: "Unknown action" };
+  }
+
+  return ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// Lấy danh sách file .docx/.pdf từ snapshot, KHÔNG trả fileId/link thật.
+// Random sẵn 1 file "thắng", tạo ticket ngẫu nhiên, lưu ánh xạ ticket -> fileId thật vào Cache.
+function handleCaseOpeningList_() {
+  const snapshot = loadSnapshot();
+  const candidates = [];
+
+  for (const fileId in snapshot) {
+    const entry = snapshot[fileId];
+    if (entry.isFolder) continue;
+
+    const lowerName = entry.name.toLowerCase();
+    const matchesExt = CASE_OPENING_ALLOWED_EXTENSIONS.some(ext => lowerName.endsWith(ext));
+    if (!matchesExt) continue;
+
+    candidates.push({ fileId: fileId, name: entry.name });
+  }
+
+  if (candidates.length === 0) {
+    return { error: "Không có file .docx/.pdf nào trong thư mục" };
+  }
+
+  // Random 1 file thắng ngay tại đây (server-side), không để client tự chọn
+  const winnerIndex = Math.floor(Math.random() * candidates.length);
+  const winner = candidates[winnerIndex];
+
+  // Tạo ticket ngẫu nhiên không đoán được, lưu ánh xạ ticket -> fileId thật trong Cache (tạm thời)
+  const ticket = Utilities.getUuid();
+  const cache = CacheService.getScriptCache();
+  cache.put("ticket_" + ticket, winner.fileId, CASE_OPENING_TICKET_TTL_SECONDS);
+
+  // Trả về: danh sách TÊN file để hiệu ứng quay hiển thị (không có link, không có fileId thật),
+  // kèm ticket để client gọi action=reveal sau khi hiệu ứng quay xong,
+  // và tên file thắng (để UI biết dừng quay đúng chỗ) nhưng KHÔNG kèm fileId/link của nó.
+  return {
+    items: candidates.map(c => ({ name: c.name })), // ẩn fileId thật khỏi toàn bộ danh sách
+    winnerName: winner.name,
+    ticket: ticket
+  };
+}
+
+// Nhận ticket, trả về link Drive thật tương ứng. Ticket chỉ dùng được 1 lần.
+function handleCaseOpeningReveal_(ticket) {
+  if (!ticket) {
+    return { error: "Thiếu ticket" };
+  }
+
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "ticket_" + ticket;
+  const fileId = cache.get(cacheKey);
+
+  if (!fileId) {
+    return { error: "Ticket không hợp lệ hoặc đã hết hạn" };
+  }
+
+  cache.remove(cacheKey); // dùng 1 lần, xóa ngay sau khi reveal
+
+  const snapshot = loadSnapshot();
+  const entry = snapshot[fileId];
+
+  if (!entry) {
+    return { error: "File không còn tồn tại" };
+  }
+
+  return {
+    name: entry.name,
+    url: entry.url
+  };
+}
+
+function pushFileListToWorker() {
+  const snapshot = loadSnapshot();
+  const files = [];
+
+  for (const id in snapshot) {
+    const entry = snapshot[id];
+    if (entry.isFolder) continue;
+    const lowerName = entry.name.toLowerCase();
+    if (!CASE_OPENING_ALLOWED_EXTENSIONS.some(ext => lowerName.endsWith(ext))) continue;
+    files.push({ n: entry.name, u: entry.url });
+  }
+
+  if (files.length === 0) {
+    Logger.log("pushFileListToWorker: không có file .docx/.pdf, bỏ qua");
+    return;
+  }
+
+  const res = UrlFetchApp.fetch(WORKER_URL + "/admin/update", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + PropertiesService.getScriptProperties().getProperty("WORKER_ADMIN_SECRET") },
+    payload: JSON.stringify(files),
+    muteHttpExceptions: true
+  });
+
+  Logger.log("pushFileListToWorker: " + res.getResponseCode() + " " + res.getContentText().substring(0, 200));
 }
