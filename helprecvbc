@@ -1,0 +1,74 @@
+import time
+import math
+import threading
+import pyautogui
+from pynput import keyboard
+
+# Bật chế độ an toàn: Rê chuột nhanh vào góc trên bên trái màn hình để dừng khẩn cấp
+pyautogui.FAILSAFE = True
+pyautogui.PAUSE = 0.001  # Tối ưu tốc độ xử lý
+
+running = False
+center_x, center_y = 0, 0
+
+def hold_and_wiggle():
+    global running, center_x, center_y
+    
+    # Lấy vị trí chuột hiện tại làm tâm dao động
+    center_x, center_y = pyautogui.position()
+    print(f"\n[+] Bắt đầu giữ chuột tại vị trí: ({center_x}, {center_y})")
+    print("[!] Nhấn phím 'F8' để TẮT / BẬT.")
+    
+    # Nhấn giữ chuột trái
+    pyautogui.mouseDown(button='left')
+    
+    angle = 0
+    radius = 5  # Bán kính dao động (pixel) - có thể điều chỉnh
+    
+    try:
+        while running:
+            # Tính toán vị trí dao động hình tròn xung quanh tâm
+            offset_x = int(radius * math.cos(angle))
+            offset_y = int(radius * math.sin(angle))
+            
+            pyautogui.moveTo(center_x + offset_x, center_y + offset_y)
+            
+            angle += 0.5  # Tốc độ quay
+            time.sleep(0.01)  # Khoảng thời gian giữa các bước nhích chuột
+            
+    finally:
+        # Nhả chuột trái khi dừng lại
+        pyautogui.mouseUp(button='left')
+        print("[-] Đã thả chuột và dừng công cụ.")
+
+def toggle_script():
+    global running
+    running = not running
+    if running:
+        # Chạy vòng lặp trong một luồng riêng để không làm đơ phím tắt
+        t = threading.Thread(target=hold_and_wiggle)
+        t.daemon = True
+        t.start()
+
+def on_press(key):
+    try:
+        # Đổi phím tắt tại đây nếu muốn (ví dụ: F8)
+        if key == keyboard.Key.f8:
+            toggle_script()
+    except AttributeError:
+        pass
+
+if __name__ == "__main__":
+    print("==========================================")
+    print("   CÔNG CỤ GIỮ VÀ DAO ĐỘNG CHUỘT TỰ ĐỘNG   ")
+    print("==========================================")
+    print("Hướng dẫn:")
+    print(" 1. Di chuyển chuột đến vị trí cần giữ.")
+    print(" 2. Nhấn phím 'F8' để BẬT / TẮT.")
+    print(" 3. Nhấn Ctrl+C tại cửa sổ này để THOÁT chương trình.")
+    print(" 4. Hỗ trợ khẩn cấp: Di chuột nhanh vào góc trên-trái màn hình.")
+    print("------------------------------------------")
+
+    # Lắng nghe phím tắt toàn hệ thống
+    with keyboard.Listener(on_press=on_press) as listener:
+        listener.join()
