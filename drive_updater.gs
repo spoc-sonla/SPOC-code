@@ -3,9 +3,13 @@ const FOLDER_ID = "1A5gyIKW9YOeYq8F11Pil1OBt55Lq8N5c";
 const ROOT_ID = FOLDER_ID;
 const ROOT_NAME = "SPOC";
 const TOKEN_PROP = "DRIVE_PAGE_TOKEN";
-const SNAPSHOT_FILENAME = "_drive_monitor_snapshot.json"; // file ẩn lưu snapshot, nằm ngoài thư mục theo dõi
-const SNAPSHOT_FILE_ID_PROP = "SNAPSHOT_FILE_ID"; // lưu ID của file snapshot để truy cập nhanh, không cần tìm kiếm mỗi lần
+const SNAPSHOT_FILENAME = "_drive_monitor_snapshot.json";
+const SNAPSHOT_FILE_ID_PROP = "SNAPSHOT_FILE_ID"; 
 const WORKER_URL = "https://name.workers.dev";
+const EXTRA_FOLDER_IDS = [
+  "1v3cw_Ul4NMk39GMsJ2uBuBiX2mkbP08V",
+  "1i4sBVRN_YabbVDIJvGK9tI3bAkwpiYX2",
+];
 
 function taoSecret() {
   Logger.log(Utilities.getUuid() + Utilities.getUuid().replace(/-/g, ""));
@@ -554,129 +558,242 @@ function postToDiscordWithRetry(payload) {
   Utilities.sleep(350);
 }
 
-// ================= WEB APP: RANDOM FILE OPENER =================
+// ================= RANDOM FILE OPENER: ĐẨY DANH SÁCH FILE LÊN CLOUDFLARE WORKER =================
 
 const CASE_OPENING_ALLOWED_EXTENSIONS = [".docx", ".pdf"];
-const CASE_OPENING_TICKET_TTL_SECONDS = 120; // ticket hết hạn sau 2 phút nếu không reveal kịp
-// const CASE_OPENING_SECRET = "806f239e-0a9f-4e9a-8b07-88835bf8b98c4e990e1edbeb408d962c2ac669d75dff";
 
-function doGet(e) {
-  const token = e.parameter.token;
-  if (token !== CASE_OPENING_SECRET) {
-    return ContentService
-      .createTextOutput(JSON.stringify({ error: "Unauthorized" }))
-      .setMimeType(ContentService.MimeType.JSON);
+const EXTRA_CACHE_FILENAME = "_extra_files_cache.json";
+const EXTRA_CACHE_ID_PROP = "EXTRA_CACHE_FILE_ID";
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+const SHORTCUT_MIME = "application/vnd.google-apps.shortcut";
+const EXTRA_MIME_TO_EXT = {
+  "application/pdf": ".pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"
+};
+
+function getExtraCacheFile() {
+  const props = PropertiesService.getScriptProperties();
+  const cachedId = props.getProperty(EXTRA_CACHE_ID_PROP);
+  if (cachedId) {
+    try {
+      const f = DriveApp.getFileById(cachedId);
+      if (!f.isTrashed()) return f;
+    } catch (e) {}
   }
-
-  const action = e.parameter.action;
-
-  let result;
-  if (action === "list") {
-    result = handleCaseOpeningList_();
-  } else if (action === "reveal") {
-    result = handleCaseOpeningReveal_(e.parameter.ticket);
-  } else {
-    result = { error: "Unknown action" };
-  }
-
-  return ContentService
-    .createTextOutput(JSON.stringify(result))
-    .setMimeType(ContentService.MimeType.JSON);
+  const newFile = DriveApp.createFile(EXTRA_CACHE_FILENAME, "{}", MimeType.PLAIN_TEXT);
+  props.setProperty(EXTRA_CACHE_ID_PROP, newFile.getId());
+  return newFile;
 }
 
-// Lấy danh sách file .docx/.pdf từ snapshot, KHÔNG trả fileId/link thật.
-// Random sẵn 1 file "thắng", tạo ticket ngẫu nhiên, lưu ánh xạ ticket -> fileId thật vào Cache.
-function handleCaseOpeningList_() {
-  const snapshot = loadSnapshot();
-  const candidates = [];
-
-  for (const fileId in snapshot) {
-    const entry = snapshot[fileId];
-    if (entry.isFolder) continue;
-
-    const lowerName = entry.name.toLowerCase();
-    const matchesExt = CASE_OPENING_ALLOWED_EXTENSIONS.some(ext => lowerName.endsWith(ext));
-    if (!matchesExt) continue;
-
-    candidates.push({ fileId: fileId, name: entry.name });
+function loadExtraCache() {
+  try {
+    return JSON.parse(getExtraCacheFile().getBlob().getDataAsString() || "{}");
+  } catch (e) {
+    return {};
   }
+}
 
-  if (candidates.length === 0) {
-    return { error: "Không có file .docx/.pdf nào trong thư mục" };
-  }
+function extraDisplayName(item) {
+  const lowerName = item.name.toLowerCase();
+  if (CASE_OPENING_ALLOWED_EXTENSIONS.some(ext => lowerName.endsWith(ext))) return item.name;
+  const mimeExt = EXTRA_MIME_TO_EXT[item.mimeType];
+  return mimeExt ? item.name + mimeExt : null;
+}
 
-  // Random 1 file thắng ngay tại đây (server-side), không để client tự chọn
-  const winnerIndex = Math.floor(Math.random() * candidates.length);
-  const winner = candidates[winnerIndex];
-
-  // Tạo ticket ngẫu nhiên không đoán được, lưu ánh xạ ticket -> fileId thật trong Cache (tạm thời)
-  const ticket = Utilities.getUuid();
-  const cache = CacheService.getScriptCache();
-  cache.put("ticket_" + ticket, winner.fileId, CASE_OPENING_TICKET_TTL_SECONDS);
-
-  // Trả về: danh sách TÊN file để hiệu ứng quay hiển thị (không có link, không có fileId thật),
-  // kèm ticket để client gọi action=reveal sau khi hiệu ứng quay xong,
-  // và tên file thắng (để UI biết dừng quay đúng chỗ) nhưng KHÔNG kèm fileId/link của nó.
+function driveListRequest(folderId, pageToken) {
+  const q = "'" + folderId + "' in parents and trashed = false";
+  let url = "https://www.googleapis.com/drive/v3/files"
+    + "?q=" + encodeURIComponent(q)
+    + "&fields=" + encodeURIComponent("nextPageToken,files(id,name,mimeType,webViewLink,shortcutDetails)")
+    + "&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true";
+  if (pageToken) url += "&pageToken=" + encodeURIComponent(pageToken);
   return {
-    items: candidates.map(c => ({ name: c.name })), // ẩn fileId thật khỏi toàn bộ danh sách
-    winnerName: winner.name,
-    ticket: ticket
+    url: url,
+    method: "get",
+    headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
   };
 }
 
-// Nhận ticket, trả về link Drive thật tương ứng. Ticket chỉ dùng được 1 lần.
-function handleCaseOpeningReveal_(ticket) {
-  if (!ticket) {
-    return { error: "Thiếu ticket" };
+function scanTree(rootId, deadline) {
+  const out = [];
+  const stats = { requests: 0, items: 0, folders: 0, errors: 0, lastError: "", mime: {} };
+  const seenFolders = {};
+  const seenFiles = {};
+  seenFolders[rootId] = true;
+  let queue = [{ id: rootId, token: null, tries: 0 }];
+
+  while (queue.length > 0) {
+    if (Date.now() > deadline) throw new Error("hết thời gian quét");
+    const batch = queue.splice(0, 40);
+    const responses = UrlFetchApp.fetchAll(batch.map(t => driveListRequest(t.id, t.token)));
+    stats.requests += batch.length;
+    const retry = [];
+
+    responses.forEach((res, i) => {
+      const task = batch[i];
+      const code = res.getResponseCode();
+      const text = res.getContentText();
+
+      if (code !== 200) {
+        const rateLimited = code === 429 || code >= 500 || (code === 403 && text.indexOf("ateLimit") !== -1);
+        task.tries++;
+        if (rateLimited && task.tries <= 5) {
+          retry.push(task);
+        } else {
+          stats.errors++;
+          stats.lastError = "HTTP " + code + " " + text.substring(0, 160).replace(/\s+/g, " ");
+        }
+        return;
+      }
+
+      const data = JSON.parse(text);
+      for (const item of (data.files || [])) {
+        stats.items++;
+        if (item.mimeType === FOLDER_MIME) {
+          stats.folders++;
+          if (!seenFolders[item.id]) {
+            seenFolders[item.id] = true;
+            queue.push({ id: item.id, token: null, tries: 0 });
+          }
+        } else if (item.mimeType === SHORTCUT_MIME) {
+          const d = item.shortcutDetails;
+          if (d && d.targetMimeType === FOLDER_MIME && !seenFolders[d.targetId]) {
+            seenFolders[d.targetId] = true;
+            queue.push({ id: d.targetId, token: null, tries: 0 });
+          }
+        } else {
+          stats.mime[item.mimeType] = (stats.mime[item.mimeType] || 0) + 1;
+          const displayName = extraDisplayName(item);
+          if (!displayName || seenFiles[item.id]) continue;
+          seenFiles[item.id] = true;
+          out.push({ id: item.id, n: displayName, u: item.webViewLink || ("https://drive.google.com/open?id=" + item.id) });
+        }
+      }
+      if (data.nextPageToken) queue.push({ id: task.id, token: data.nextPageToken, tries: 0 });
+    });
+
+    if (retry.length > 0) {
+      Utilities.sleep(1500);
+      queue = retry.concat(queue);
+    }
   }
-
-  const cache = CacheService.getScriptCache();
-  const cacheKey = "ticket_" + ticket;
-  const fileId = cache.get(cacheKey);
-
-  if (!fileId) {
-    return { error: "Ticket không hợp lệ hoặc đã hết hạn" };
-  }
-
-  cache.remove(cacheKey); // dùng 1 lần, xóa ngay sau khi reveal
-
-  const snapshot = loadSnapshot();
-  const entry = snapshot[fileId];
-
-  if (!entry) {
-    return { error: "File không còn tồn tại" };
-  }
-
-  return {
-    name: entry.name,
-    url: entry.url
-  };
+  return { files: out, stats: stats };
 }
 
-function pushFileListToWorker() {
+function spocFromSnapshot() {
   const snapshot = loadSnapshot();
-  const files = [];
-
+  const list = [];
   for (const id in snapshot) {
     const entry = snapshot[id];
     if (entry.isFolder) continue;
     const lowerName = entry.name.toLowerCase();
     if (!CASE_OPENING_ALLOWED_EXTENSIONS.some(ext => lowerName.endsWith(ext))) continue;
-    files.push({ n: entry.name, u: entry.url });
+    list.push({ id: id, n: entry.name, u: entry.url });
+  }
+  return list;
+}
+
+function kiemTraSnapshot() {
+  const file = getOrCreateSnapshotFile();
+  const content = file.getBlob().getDataAsString();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(content || "{}");
+  } catch (e) {
+    Logger.log("Snapshot KHÔNG đọc được (JSON lỗi): " + e.message);
+  }
+  Logger.log("File snapshot: " + file.getName() + " | id " + file.getId() + " | " + content.length + " ký tự | sửa lần cuối " + file.getLastUpdated());
+  if (parsed) {
+    const total = Object.keys(parsed).length;
+    Logger.log("Số mục trong snapshot: " + total + " | file .pdf/.docx: " + spocFromSnapshot().length);
+  }
+}
+
+function pushFileListToWorker() {
+  const scanDeadline = Date.now() + 240000;
+  const lines = [];
+  const names = [];
+  const seen = {};
+
+  function add(id, name, url) {
+    if (seen[id]) return false;
+    seen[id] = true;
+    const cleanName = String(name).replace(/[\t\r\n]+/g, " ");
+    lines.push(cleanName + "\t" + url);
+    names.push({ name: cleanName });
+    return true;
   }
 
-  if (files.length === 0) {
+  const old = loadExtraCache();
+  const fresh = {};
+  const counts = { spoc: 0, extra: 0 };
+  const roots = [{ id: ROOT_ID, label: "SPOC" }].concat(EXTRA_FOLDER_IDS.map(id => ({ id: id, label: "Ngoài " + id })));
+
+  for (const root of roots) {
+    let list;
+    try {
+      let targetId = root.id;
+      if (root.id !== ROOT_ID) {
+        const meta = Drive.Files.get(root.id, { fields: "id,mimeType,shortcutDetails", supportsAllDrives: true });
+        if (meta.mimeType === SHORTCUT_MIME && meta.shortcutDetails) targetId = meta.shortcutDetails.targetId;
+      }
+
+      const result = scanTree(targetId, scanDeadline);
+      const s = result.stats;
+      list = result.files;
+      Logger.log("[" + root.label + "] " + s.requests + " request, duyệt " + s.items + " mục (" + s.folders + " thư mục), khớp " + list.length + " file" + (s.errors ? ", LỖI " + s.errors + " request: " + s.lastError : ""));
+      if (list.length === 0) Logger.log("  các loại file tìm thấy: " + JSON.stringify(s.mime));
+
+      const before = old[root.id] ? old[root.id].length : 0;
+      if (before > 20 && list.length < before * 0.5) {
+        Logger.log("  số file giảm bất thường (" + before + " -> " + list.length + "), giữ bản cũ");
+        list = old[root.id];
+      }
+    } catch (e) {
+      Logger.log("[" + root.label + "] Lỗi quét: " + e.message + (old[root.id] ? " -> dùng bản cũ" : ""));
+      list = old[root.id] || [];
+    }
+
+    if (root.id === ROOT_ID && list.length === 0) {
+      list = spocFromSnapshot();
+      Logger.log("[SPOC] quét trực tiếp không ra file, dùng snapshot: " + list.length + " file");
+    }
+
+    fresh[root.id] = list;
+    for (const f of list) {
+      if (add(f.id, f.n, f.u)) {
+        if (root.id === ROOT_ID) counts.spoc++;
+        else counts.extra++;
+      }
+    }
+  }
+
+  try {
+    getExtraCacheFile().setContent(JSON.stringify(fresh));
+  } catch (e) {
+    Logger.log("Không lưu được cache: " + e.message);
+  }
+
+  if (lines.length === 0) {
     Logger.log("pushFileListToWorker: không có file .docx/.pdf, bỏ qua");
     return;
   }
 
-  const res = UrlFetchApp.fetch(WORKER_URL + "/admin/update", {
+  const options = {
     method: "post",
-    contentType: "application/json",
+    contentType: "text/plain; charset=utf-8",
     headers: { Authorization: "Bearer " + PropertiesService.getScriptProperties().getProperty("WORKER_ADMIN_SECRET") },
-    payload: JSON.stringify(files),
     muteHttpExceptions: true
-  });
+  };
 
-  Logger.log("pushFileListToWorker: " + res.getResponseCode() + " " + res.getContentText().substring(0, 200));
+  const responses = UrlFetchApp.fetchAll([
+    Object.assign({ url: WORKER_URL + "/admin/update?key=files", payload: lines.join("\n") }, options),
+    Object.assign({ url: WORKER_URL + "/admin/update?key=names", payload: JSON.stringify({ items: names }) }, options)
+  ]);
+
+  responses.forEach((r, i) => {
+    Logger.log("push " + (i === 0 ? "files" : "names") + ": " + r.getResponseCode() + " " + r.getContentText().substring(0, 200));
+  });
+  Logger.log("Đã đẩy " + lines.length + " file (SPOC: " + counts.spoc + ", thư mục ngoài: " + counts.extra + ")");
 }
